@@ -1,7 +1,8 @@
 """Sussurro — voice-to-text local: mic -> Silero VAD -> faster-whisper large-v3 (CUDA).
 
 HUD Tkinter: gravar/parar, atalho global de mouse (digita onde o cursor estiver),
-escolha de microfone, modo de transcricao (simultaneo por trecho ou tudo ao final).
+fonte de captura (microfone, audio do PC via loopback WASAPI ou os dois misturados),
+modo de transcricao (simultaneo por trecho ou tudo ao final).
 """
 
 import ctypes
@@ -85,6 +86,8 @@ DEFAULT_SETTINGS = {
     "mouse_button": "x2",       # middle | x1 | x2
     "trigger_mode": "alternar",  # alternar (clique liga/desliga) | segurar (push-to-talk)
     "device_name": None,
+    "capture_mode": "microfone",  # microfone | audio_pc | os_dois
+    "loopback_device_name": None,  # None = padrao do sistema
     "transcribe_mode": "simultaneo",  # simultaneo | final
     "language": "pt",
     "inject_method": "colar",   # colar (Ctrl+V, clipboard preservado) | digitar
@@ -95,6 +98,10 @@ DEFAULT_SETTINGS = {
 WM_MBUTTONDOWN, WM_MBUTTONUP = 0x0207, 0x0208
 WM_XBUTTONDOWN, WM_XBUTTONUP = 0x020B, 0x020C
 BUTTON_LABELS = {"middle": "botao do meio", "x1": "lateral 1 (tras)", "x2": "lateral 2 (frente)"}
+
+# rotulos do combo FONTE <-> valores persistidos em settings.json
+CAPTURE_LABELS = {"microfone": "microfone", "audio_pc": "audio do PC", "os_dois": "os dois"}
+CAPTURE_VALUES = {v: k for k, v in CAPTURE_LABELS.items()}
 
 
 def load_settings() -> dict:
@@ -115,6 +122,16 @@ def list_input_devices() -> dict:
         d["name"]: d["index"]
         for d in sd.query_devices()
         if d["max_input_channels"] > 0 and d["hostapi"] == wasapi
+    }
+
+
+def list_loopback_devices() -> dict:
+    """Nome -> indice, saidas WASAPI (capturaveis via loopback p/ pegar o audio do PC)."""
+    wasapi = next(i for i, h in enumerate(sd.query_hostapis()) if "WASAPI" in h["name"])
+    return {
+        d["name"]: d["index"]
+        for d in sd.query_devices()
+        if d["max_output_channels"] > 0 and d["hostapi"] == wasapi
     }
 
 
@@ -274,14 +291,18 @@ class Transcriber:
         self._segment_queue: queue.Queue = queue.Queue()
         self._session_parts: list = []
         self._session_started = None
-        self._stream = None
-        self._resampler = None
+        self._streams: list = []
+        self._resamplers: list = []   # um resampler por stream (taxa nativa != 16 kHz)
+        self._slot = 0                # indice do stream sendo aberto em start()
+        self._mix_lock = threading.Lock()
+        self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
         self._session_inject = False
         self._session_mode = "simultaneo"
         self._session_had_speech = False
         self._keyboard = keyboard.Controller()
         threading.Thread(target=self._segmenter_loop, daemon=True).start()
         threading.Thread(target=self._transcribe_loop, daemon=True).start()
+        threading.Thread(target=self._mixer_loop, daemon=True).start()
 
     # -- modelo -------------------------------------------------------------
     def load_model(self):
@@ -293,41 +314,150 @@ class Transcriber:
         self.status_queue.put(f"Modelo pronto ({time.perf_counter() - t0:.1f}s). Pode gravar.")
 
     # -- captura ------------------------------------------------------------
-    def _mic_callback(self, indata, frames, time_info, status):
-        if status:
-            self.status_queue.put(f"Aviso do mic: {status}")
-        if self.recording.is_set():
-            data = indata[:, 0]
-            data = self._resampler.process(data) if self._resampler else data.copy()
-            if data.size:
-                self._audio_queue.put(data)
+    def _make_callback(self, label: str, slot: int):
+        """Callback de um stream: downmix mono, reamostra e guarda no slot dele."""
 
-    def start(self, device_index: int | None, inject: bool):
+        def cb(indata, frames, time_info, status):
+            if status:
+                self.status_queue.put(f"Aviso ({label}): {status}")
+            if not self.recording.is_set():
+                return
+            mono = indata.mean(axis=1)  # downmix p/ mono
+            res = self._resamplers[slot]
+            data = res.process(mono) if res else mono.copy()
+            with self._mix_lock:
+                self._mix_buffers[slot].append(data)
+
+        return cb
+
+    def _mixer_loop(self):
+        """Junta os buffers dos streams (min len, soma, clip) e alimenta o VAD."""
+        while True:
+            time.sleep(0.01)
+            with self._mix_lock:
+                if not self._mix_buffers or any(not b for b in self._mix_buffers):
+                    continue
+                # descarta cabecas vazias
+                for i, buf in enumerate(self._mix_buffers):
+                    while buf and buf[0].size == 0:
+                        buf.pop(0)
+                if any(not b for b in self._mix_buffers):
+                    continue
+                n = min(b[0].size for b in self._mix_buffers)
+                if n <= 0:
+                    continue
+                mixed = np.zeros(n, dtype=np.float32)
+                for i, buf in enumerate(self._mix_buffers):
+                    mixed += buf[0][:n]
+                    rest = buf[0][n:]
+                    self._mix_buffers[i] = ([rest] if rest.size else []) + buf[1:]
+            np.clip(mixed, -1.0, 1.0, out=mixed)
+            self._audio_queue.put(mixed)
+
+    def _loopback_loop(self, slot: int, label: str, device_index: int | None, handle):
+        """Captura o que o PC esta tocando (WASAPI loopback via soundcard)."""
+        try:
+            import soundcard as sc
+            if device_index is None:
+                spk = sc.default_speaker()
+            else:
+                name = sd.query_devices(device_index)["name"]
+                try:
+                    spk = sc.get_speaker(name)
+                except Exception:
+                    spk = sc.default_speaker()
+                    self.status_queue.put(f"{label}: canal '{name}' nao achado, usando padrao ({spk.name}).")
+            loop = sc.get_microphone(id=spk.id, include_loopback=True)
+        except Exception as e:
+            self.status_queue.put(f"ERRO ({label}): {e}")
+            return
+        native = 48000
+        res = StreamResampler(native)
+        self._resamplers[slot] = res
+        while not self.recording.is_set() and not handle.stop_flag.is_set():
+            time.sleep(0.02)
+        try:
+            with loop.recorder(samplerate=native, channels=2) as rec:
+                chunk = int(native * 0.1)
+                while self.recording.is_set() and not handle.stop_flag.is_set():
+                    block = rec.record(numframes=chunk)
+                    if block is None or block.size == 0:
+                        continue
+                    mono = block.mean(axis=1).astype(np.float32)
+                    data = res.process(mono)
+                    if data.size:
+                        with self._mix_lock:
+                            self._mix_buffers[slot].append(data)
+        except Exception as e:
+            self.status_queue.put(f"ERRO ({label}): {e}")
+
+    def _open_stream(self, device_index: int | None, loopback: bool, label: str):
+        """Abre mic (sounddevice) ou audio do PC (soundcard loopback)."""
+        if loopback:
+            class _LoopbackHandle:
+                def __init__(self):
+                    self.stop_flag = threading.Event()
+                def stop(self):
+                    self.stop_flag.set()
+                def close(self):
+                    self.stop_flag.set()
+            handle = _LoopbackHandle()
+            self._resamplers.append(None)
+            threading.Thread(
+                target=self._loopback_loop,
+                args=(self._slot, label, device_index, handle),
+                daemon=True,
+            ).start()
+            self._streams.append(handle)
+            return
+        try:
+            stream = sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                blocksize=BLOCK_SIZE, device=device_index,
+                callback=self._make_callback(label, self._slot),
+            )
+            stream.start()
+            self._resamplers.append(None)
+        except sd.PortAudioError:
+            query = device_index if device_index is not None else sd.default.device[0]
+            native = int(sd.query_devices(query)["default_samplerate"])
+            self._resamplers.append(StreamResampler(native))
+            stream = sd.InputStream(
+                samplerate=native, channels=1, dtype="float32",
+                blocksize=int(native * 0.1), device=device_index,
+                callback=self._make_callback(label, self._slot),
+            )
+            stream.start()
+        self._streams.append(stream)
+
+    def start(self, device_index: int | None, inject: bool,
+              capture_mode: str = "microfone", loopback_index: int | None = None):
         if self.recording.is_set():
             return
         self._session_inject = inject
         self._session_mode = self.transcribe_mode
         self._session_had_speech = False
         self._session_started = datetime.now()
-        self._resampler = None
+        self._streams = []
+        self._resamplers = []
+        self._mix_buffers = [[], []] if capture_mode == "os_dois" else [[]]
+        self._slot = 0
         try:
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                blocksize=BLOCK_SIZE, device=device_index, callback=self._mic_callback,
-            )
-            self._stream.start()
-        except sd.PortAudioError:
-            # dispositivo nao aceita 16 kHz (WASAPI): abre na taxa nativa e reamostra
-            query = device_index if device_index is not None else sd.default.device[0]
-            native = int(sd.query_devices(query)["default_samplerate"])
-            self._resampler = StreamResampler(native)
-            self._stream = sd.InputStream(
-                samplerate=native, channels=1, dtype="float32",
-                blocksize=int(native * 0.1), device=device_index, callback=self._mic_callback,
-            )
-            self._stream.start()
+            if capture_mode != "audio_pc":
+                self._open_stream(device_index, False, "mic")
+                self._slot += 1
+            if capture_mode != "microfone":
+                self._open_stream(loopback_index, True, "audio do PC")
+        except Exception:
+            # falhou um dos streams: fecha o que abriu e propaga com o dispositivo culpado
+            for s in self._streams:
+                s.stop()
+                s.close()
+            raise
         self.recording.set()
-        self.status_queue.put("Gravando — pode falar.")
+        fonte = {"microfone": "mic", "audio_pc": "audio do PC",
+                 "os_dois": "mic + audio do PC"}[capture_mode]
+        self.status_queue.put(f"Gravando ({fonte}) — pode falar.")
 
     def stop(self):
         if not self.recording.is_set():
@@ -337,9 +467,10 @@ class Transcriber:
         # e a ordem na fila e o que impede "Transcrevendo..." de ficar pendurado
         self.status_queue.put("Parado. Transcrevendo...")
         self._audio_queue.put(None)  # sentinela: descarrega o buffer restante
-        stream, self._stream = self._stream, None
-        stream.stop()
-        stream.close()
+        streams, self._streams = self._streams, []
+        for s in streams:
+            s.stop()
+            s.close()
 
     # -- segmentacao --------------------------------------------------------
     def _segmenter_loop(self):
@@ -630,6 +761,7 @@ class App:
 
         self.settings = load_settings()
         self.devices = list_input_devices()
+        self.loopback_devices = list_loopback_devices()
 
         self.text_queue: queue.Queue = queue.Queue()
         self.status_queue: queue.Queue = queue.Queue()
@@ -731,6 +863,23 @@ class App:
                             self._on_inject, 3, 1, bottom=14)
         self.lang = combo(["pt", "en", "auto"], self.settings["language"],
                           self._on_lang, 3, 2, bottom=14)
+
+        # 3a linha: fonte de captura (mic / audio do PC / os dois) + canal do PC
+        cfg_label("FONTE", 4, 0)
+        cfg_label("CANAL DO PC", 4, 1)
+        self.fonte = combo(["microfone", "audio do PC", "os dois"],
+                           CAPTURE_LABELS[self.settings["capture_mode"]],
+                           self._on_fonte, 5, 0, bottom=14)
+        pc_names = ["padrao do sistema"] + list(self.loopback_devices)
+        saved_pc = self.settings["loopback_device_name"]
+        if saved_pc not in self.loopback_devices:
+            saved_pc = None
+        self.pc_channel = combo(pc_names, "padrao do sistema" if saved_pc is None else saved_pc,
+                                self._on_pc_channel, 5, 1, bottom=14)
+        self.pc_channel.configure(
+            state="disabled" if self.settings["capture_mode"] == "microfone" else "readonly")
+        ctk.CTkLabel(card, text="", height=14).grid(row=4, column=2,
+                                                    padx=14, pady=(10, 0))
 
         # abas: acento fica no GRAVAR; aba ativa marca por chapa mais clara
         tabbar = ctk.CTkFrame(root, fg_color="transparent")
@@ -873,6 +1022,18 @@ class App:
         self.settings["device_name"] = self.mic.get()
         self._save()
 
+    def _on_fonte(self, _e):
+        mode = CAPTURE_VALUES[self.fonte.get()]
+        self.settings["capture_mode"] = mode
+        self.pc_channel.configure(
+            state="disabled" if mode == "microfone" else "readonly")
+        self._save()
+
+    def _on_pc_channel(self, _e):
+        name = self.pc_channel.get()
+        self.settings["loopback_device_name"] = None if name == "padrao do sistema" else name
+        self._save()
+
     def _on_mode(self, _e):
         self.settings["transcribe_mode"] = self.mode.get()
         self.transcriber.transcribe_mode = self.mode.get()
@@ -896,14 +1057,31 @@ class App:
     def _device_index(self):
         return self.devices.get(self.mic.get())
 
+    def _pc_device_index(self):
+        name = self.settings["loopback_device_name"]
+        if name not in self.loopback_devices:
+            return None  # None + loopback = saida padrao do sistema
+        return self.loopback_devices[name]
+
     def _start(self, inject: bool):
         if self.transcriber.model is None:
             self.status.configure(text="Modelo ainda carregando — aguarde.")
             return False
         try:
-            self.transcriber.start(self._device_index(), inject)
+            self.transcriber.start(
+                self._device_index(), inject,
+                capture_mode=self.settings["capture_mode"],
+                loopback_index=self._pc_device_index(),
+            )
         except Exception as e:
-            self.status.configure(text=f"ERRO ao abrir o microfone: {e}")
+            fonte = self.settings["capture_mode"]
+            if fonte == "audio_pc":
+                alvo = "o audio do PC"
+            elif fonte == "os_dois":
+                alvo = "o microfone ou o audio do PC"
+            else:
+                alvo = "o microfone"
+            self.status.configure(text=f"ERRO ao abrir {alvo}: {e}")
             return False
         self.record_btn.configure(text="PARAR")
         self.dot.show("rec")

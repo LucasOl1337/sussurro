@@ -8,3 +8,4 @@ pillow
 # CUDA runtime do ctranslate2 (mesmas versoes validadas na maquina em 2026-08-21)
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.24.0.43
+soundcard>=0.4

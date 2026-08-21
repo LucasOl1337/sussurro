@@ -49,6 +49,8 @@ Na primeira execução o modelo `large-v3` é baixado pelo faster-whisper e depo
 - **Atalho global de mouse** — o botão configurado (padrão: lateral 2 / "frente") liga e desliga a gravação em qualquer aplicativo; o clique é suprimido, então não vira "voltar/avançar" no browser. Em `Setar` você clica o botão desejado (meio, lateral 1 ou lateral 2) para redefinir.
 - **Ação** — `alternar` (clique liga/desliga) ou `segurar` (push-to-talk).
 - **Microfone** — seletor com as entradas WASAPI disponíveis.
+- **Fonte** — `microfone` (entrada), `audio do PC` (o que está saindo nas caixas/fones, via loopback WASAPI) ou `os dois` (mistura mic + PC antes do VAD/whisper).
+- **Canal do PC** — qual saída capturar no modo `audio do PC` / `os dois`. `padrao do sistema` usa o dispositivo de reprodução atual do Windows. O combo fica desabilitado quando a fonte é só microfone.
 - **Transcrição** — `simultaneo`: trechos vão aparecendo conforme você pausa entre frases (corte por VAD após ~0,7 s de silêncio); `final`: acumula tudo e transcreve de uma vez ao parar.
 - **Envio** — `colar`: cola via Ctrl+V no campo onde o cursor estiver (o clipboard original é preservado — backup/restauração de todos os formatos); `digitar`: simula teclado.
 - **Idioma** — `pt`, `en` ou `auto`.
