@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&amp;family=Inter:wght@400;500&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; }
+    a { color: #a33608; } a:hover { color: #f0500a; }
+  </style>
+</helmet>
+<div style="width: 680px; height: 300px; background: #eceded; color: #16181a; font-family: Inter, 'Segoe UI', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+  <div style="padding: 12px 16px 8px 16px; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: 17px; letter-spacing: .04em">BOLINHA — INDICADOR DE OVERLAY</div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 16px 12px 16px; flex-grow: 1">
+
+    <!-- sobre desktop escuro (barra do Windows #202020, medido) -->
+    <div style="background: #202020; border: 1px solid #c3c6c8; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px">
+      <div style="display: flex; align-items: center; gap: 40px">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 10px">
+          <div style="width: 22px; height: 22px; border-radius: 50%; background: #f0500a; border: 2px solid #f2f3f3"></div>
+          <div style="width: 66px; height: 66px; border-radius: 50%; background: #f0500a; border: 6px solid #f2f3f3"></div>
+          <div style="font-size: 10px; font-weight: 600; letter-spacing: .08em; color: #f2f3f3">GRAVANDO</div>
+        </div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 10px">
+          <div style="width: 22px; height: 22px; border-radius: 50%; background: #f2f3f3; border: 2px solid #f0500a"></div>
+          <div style="width: 66px; height: 66px; border-radius: 50%; background: #f2f3f3; border: 6px solid #f0500a"></div>
+          <div style="font-size: 10px; font-weight: 600; letter-spacing: .08em; color: #f2f3f3">TRANSCREVENDO</div>
+        </div>
+      </div>
+      <div style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; color: #9ba0a4">tamanho real 22px + ampliada 3x · fundo #202020</div>
+    </div>
+
+    <!-- sobre desktop claro -->
+    <div style="background: #d8d8d8; border: 1px solid #c3c6c8; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px">
+      <div style="display: flex; align-items: center; gap: 40px">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 10px">
+          <div style="width: 22px; height: 22px; border-radius: 50%; background: #f0500a; border: 2px solid #f2f3f3"></div>
+          <div style="width: 66px; height: 66px; border-radius: 50%; background: #f0500a; border: 6px solid #f2f3f3"></div>
+          <div style="font-size: 10px; font-weight: 600; letter-spacing: .08em; color: #16181a">GRAVANDO</div>
+        </div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 10px">
+          <div style="width: 22px; height: 22px; border-radius: 50%; background: #f2f3f3; border: 2px solid #f0500a"></div>
+          <div style="width: 66px; height: 66px; border-radius: 50%; background: #f2f3f3; border: 6px solid #f0500a"></div>
+          <div style="font-size: 10px; font-weight: 600; letter-spacing: .08em; color: #16181a">TRANSCREVENDO</div>
+        </div>
+      </div>
+      <div style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; color: #565a5d">o anel osso garante leitura em qualquer fundo</div>
+    </div>
+  </div>
+
+  <div style="border-top: 1px solid #c3c6c8; background: #e2e3e4; padding: 6px 16px; font-size: 11px; color: #45484b">Gravando = laranja com anel osso, pulsando. Transcrevendo = invertida (osso com anel laranja), parada. Some ao terminar.</div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

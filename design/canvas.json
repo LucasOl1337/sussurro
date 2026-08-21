@@ -1,0 +1,11 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 736, "h": 699, "title": "Janela — implementada (screenshot real)" },
+    { "file": "Marca.dc.html", "x": 800, "y": 0, "w": 680, "h": 420, "title": "Marca e icone" },
+    { "file": "Bolinha.dc.html", "x": 800, "y": 480, "w": 680, "h": 300, "title": "Bolinha de overlay" }
+  ],
+  "annotations": [
+    { "id": "direcao-asiimov", "x": 0, "y": 760, "w": 380, "text": "SUSSURRO — visual implementado (customtkinter, escuro):\n- Paleta Asiimov escura: fundo #131417, cards #1b1c20, campos #25262b, tinta #f2f3f3.\n- GRAVAR e o unico laranja da janela (grafite por cima, 4,96:1); aba ativa marca por chapa mais clara, nao por acento.\n- Cards e controles com canto 8-12px, hairline #454750, hierarquia por espacamento (receita LojaSync).\n- Tipos: Bahnschrift SemiBold Condensed (titulos caps), Segoe UI (corpo), Cascadia Mono (horarios/status).\n- Historico: linhas alternadas ~5%, hover = wash laranja #30211e, play/copiar como botoes fantasma.\n- Marca: onda que decresce, barras grafite sobre chapa laranja; .ico julgado a 16px sobre #202020.\n- Bolinha: laranja + anel osso (gravando) / invertida (transcrevendo)." }
+  ],
+  "launch": { "view": "canvas" }
+}

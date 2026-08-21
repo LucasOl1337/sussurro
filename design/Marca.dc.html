@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&amp;family=Inter:wght@400;500&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; }
+    a { color: #a33608; } a:hover { color: #f0500a; }
+  </style>
+</helmet>
+<div style="width: 680px; height: 420px; background: #eceded; color: #16181a; font-family: Inter, 'Segoe UI', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+  <div style="padding: 12px 16px 8px 16px; font-family: 'Barlow Condensed', 'Arial Narrow', sans-serif; font-weight: 700; font-size: 17px; letter-spacing: .04em">MARCA — SUSSURRO</div>
+
+  <!-- lockup: icone + wordmark -->
+  <div style="display: flex; align-items: center; gap: 20px; padding: 8px 24px 16px 24px">
+    <img src="sussurro.png" style="width: 112px; height: 112px">
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <div style="font-family: 'Barlow Condensed', 'Archivo Narrow', 'Arial Narrow', sans-serif; font-weight: 700; font-size: 52px; letter-spacing: .04em; line-height: 1">SUSSURRO</div>
+      <div style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; color: #565a5d">voice-to-text local · large-v3 · CUDA</div>
+    </div>
+  </div>
+
+  <!-- prova em uso real: barra do Windows -->
+  <div style="margin: 0 16px; background: #202020; border: 1px solid #c3c6c8; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 16px">
+    <img src="sheet_A.png" style="width: 592px; image-rendering: pixelated">
+    <div style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; color: #9ba0a4">16 · 24 · 32 · 48 px sobre a barra do Windows (#202020, medido) — frames reais do .ico</div>
+  </div>
+
+  <div style="flex-grow: 1"></div>
+  <div style="border-top: 1px solid #c3c6c8; background: #e2e3e4; padding: 6px 16px; font-size: 11px; color: #45484b">Onda que decresce: a voz virando sussurro. Barras grafite sobre chapa laranja (4,96:1, medido) — chapa clara porque chapa escura some sobre a barra.</div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

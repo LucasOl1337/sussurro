@@ -1,0 +1,12 @@
+# ambiente / build
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# locais da maquina: gravacoes de voz + transcricoes (PII) e preferencias
+history/
+settings.json
+
+# logs
+*.log
