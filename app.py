@@ -10,6 +10,7 @@ import ctypes.wintypes as wintypes
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -80,6 +81,7 @@ def pick_font(candidates, fallback):
     return fallback
 
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
+LIBRARY_PATH = Path(__file__).with_name("library.json")
 HISTORY_DIR = Path(__file__).with_name("history")
 HISTORY_INDEX = HISTORY_DIR / "history.jsonl"
 DEFAULT_SETTINGS = {
@@ -275,6 +277,75 @@ class StreamResampler:
         return out
 
 
+class Library:
+    """Biblioteca de palavras: troca o que o whisper escreve errado pelo termo certo.
+
+    Cada entrada e {"certo": "Grok", "erros": ["grock", "groque"]}. A troca e feita no
+    texto ja transcrito, uma unica vez, antes de ir pra UI / injecao / historico.
+    Casa sem diferenciar maiuscula e sem exigir espacamento identico ("nine houter" pega
+    "Nine  Houter"), mas so em palavra inteira — "grok" nao mexe em "grokking".
+    """
+
+    def __init__(self):
+        self._rules = None  # (regex, {variante -> certo}); trocado inteiro (outra thread le)
+        self.entries: list = []
+        self.load()
+
+    def load(self):
+        if LIBRARY_PATH.exists():
+            self.entries = json.loads(LIBRARY_PATH.read_text(encoding="utf-8"))
+        self._compile()
+
+    def save(self):
+        LIBRARY_PATH.write_text(
+            json.dumps(self.entries, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _compile(self):
+        pairs = []
+        for entry in self.entries:
+            for wrong in entry["erros"]:
+                wrong = " ".join(wrong.split())
+                if wrong:
+                    pairs.append((wrong, entry["certo"]))
+        if not pairs:
+            self._rules = None
+            return
+        pairs.sort(key=lambda p: len(p[0]), reverse=True)  # variante mais longa ganha
+        mapping = {}
+        for wrong, certo in pairs:
+            mapping.setdefault(wrong.lower(), certo)
+        alt = "|".join(r"\s+".join(re.escape(w) for w in wrong.split()) for wrong, _c in pairs)
+        # (?<!\w)/(?!\w) em vez de \b: funciona tambem com variante que comeca/termina
+        # em pontuacao, e segue pegando so palavra inteira
+        self._rules = (re.compile(rf"(?<!\w)(?:{alt})(?!\w)", re.IGNORECASE), mapping)
+
+    def add(self, certo: str, erros: list) -> int:
+        """Junta as variantes na entrada desse termo (cria se nao existir). Devolve quantas entraram."""
+        entry = next((e for e in self.entries if e["certo"].lower() == certo.lower()), None)
+        if entry is None:
+            entry = {"certo": certo, "erros": []}
+            self.entries.append(entry)
+            self.entries.sort(key=lambda e: e["certo"].lower())
+        known = {w.lower() for w in entry["erros"]}
+        novos = [w for w in erros if w.lower() not in known and w != entry["certo"]]
+        entry["erros"].extend(novos)
+        self.save()
+        self._compile()
+        return len(novos)
+
+    def remove(self, index: int):
+        del self.entries[index]
+        self.save()
+        self._compile()
+
+    def apply(self, text: str) -> str:
+        rules = self._rules
+        if not rules or not text:
+            return text
+        pattern, mapping = rules
+        return pattern.sub(lambda m: mapping[" ".join(m.group(0).lower().split())], text)
+
+
 class Transcriber:
     """Threads de captura, segmentacao (VAD) e transcricao. UI le da text_queue."""
 
@@ -282,6 +353,7 @@ class Transcriber:
         self.text_queue = text_queue
         self.status_queue = status_queue
         self.model = None
+        self.library = Library()
         self.language = "pt"
         self.transcribe_mode = "simultaneo"
         self.inject_method = "colar"
@@ -533,6 +605,7 @@ class Transcriber:
                     audio, language=lang, beam_size=5, vad_filter=(mode == "final"),
                 )
                 text = "".join(s.text for s in segments).strip()
+                text = self.library.apply(text)  # troca da Biblioteca antes de sair daqui
                 dt = time.perf_counter() - t0
                 self._session_parts.append((audio, text))
                 if text:
@@ -885,7 +958,8 @@ class App:
         tabbar = ctk.CTkFrame(root, fg_color="transparent")
         tabbar.pack(fill="x", padx=18, pady=(0, 6))
         self.tab_btns = {}
-        for name, label in (("historico", "HISTORICO"), ("aovivo", "AO VIVO")):
+        for name, label in (("historico", "HISTORICO"), ("aovivo", "AO VIVO"),
+                            ("biblioteca", "BIBLIOTECA")):
             btn = ctk.CTkButton(tabbar, text=label, width=108, height=30, corner_radius=8,
                                 fg_color="transparent", hover_color=SURFACE_2,
                                 text_color=INK_3, font=(self.FONT_DISPLAY, 14),
@@ -908,11 +982,16 @@ class App:
         self.hist_frame = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
         self.text = ctk.CTkTextbox(self.content, fg_color="transparent", text_color=INK,
                                    font=("Segoe UI", 13), wrap="word", border_width=0)
+        self.library = self.transcriber.library
+        self.lib_tab = self._build_library_tab()
+        self._tabs = {"historico": self.hist_frame, "aovivo": self.text,
+                      "biblioteca": self.lib_tab}
         self._tab = None
         self._show_tab("historico")
 
         self.entries = self._load_history()  # mais recente primeiro
         self._render_history()
+        self._render_library()
 
         self.dot = DotIndicator(root, lambda: self.settings["dot_pos"], self._save_dot_pos)
         self._playing = None
@@ -930,12 +1009,10 @@ class App:
                 btn.configure(fg_color=SURFACE_3, text_color=INK, hover_color=SURFACE_3)
             else:
                 btn.configure(fg_color="transparent", text_color=INK_3, hover_color=SURFACE_2)
-        if name == "historico":
-            self.text.pack_forget()
-            self.hist_frame.pack(fill="both", expand=True, padx=6, pady=6)
-        else:
-            self.hist_frame.pack_forget()
-            self.text.pack(fill="both", expand=True, padx=6, pady=6)
+        for n, widget in self._tabs.items():
+            if n != name:
+                widget.pack_forget()
+        self._tabs[name].pack(fill="both", expand=True, padx=6, pady=6)
 
     @staticmethod
     def _load_history():
@@ -1003,6 +1080,79 @@ class App:
             return
         winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
         self._playing = path
+
+    # -- biblioteca ----------------------------------------------------------
+    def _build_library_tab(self):
+        wrap = ctk.CTkFrame(self.content, fg_color="transparent")
+        form = ctk.CTkFrame(wrap, fg_color="transparent")
+        form.pack(fill="x", padx=2, pady=(2, 8))
+        form.grid_columnconfigure(0, weight=3)
+        form.grid_columnconfigure(1, weight=2)
+        ctk.CTkLabel(form, text="SAI ASSIM (separe variantes por virgula)", text_color=INK_3,
+                     anchor="w", height=14, font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, sticky="ew", padx=(6, 0))
+        ctk.CTkLabel(form, text="DEVE VIRAR", text_color=INK_3, anchor="w", height=14,
+                     font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        def field(placeholder, col):
+            e = ctk.CTkEntry(form, placeholder_text=placeholder, height=30, corner_radius=8,
+                             fg_color=SURFACE_2, border_color=BORDER, text_color=INK,
+                             placeholder_text_color=INK_3, font=("Segoe UI", 12))
+            e.grid(row=1, column=col, sticky="ew", padx=(6 if col == 0 else 8, 0), pady=(4, 0))
+            e.bind("<Return>", lambda _ev: self._lib_add())
+            return e
+
+        self.lib_wrong = field("grock, groque, grote", 0)
+        self.lib_right = field("Grok", 1)
+        ctk.CTkButton(form, text="Adicionar", command=self._lib_add, width=92, height=30,
+                      corner_radius=8, fg_color="transparent", hover_color=SURFACE_2,
+                      border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
+                      font=("Segoe UI", 12)).grid(row=1, column=2, padx=(8, 6), pady=(4, 0))
+        self.lib_list = ctk.CTkScrollableFrame(wrap, fg_color="transparent")
+        self.lib_list.pack(fill="both", expand=True)
+        return wrap
+
+    def _render_library(self):
+        for child in self.lib_list.winfo_children():
+            child.destroy()
+        if not self.library.entries:
+            ctk.CTkLabel(self.lib_list, text="Nenhuma palavra na biblioteca ainda.",
+                         text_color=INK_3, font=("Segoe UI", 12)).pack(anchor="w", padx=10, pady=10)
+            return
+        for i, entry in enumerate(self.library.entries):
+            base = "transparent" if i % 2 == 0 else ROW_EVEN
+            row = ctk.CTkFrame(self.lib_list, fg_color=base, corner_radius=8)
+            row.pack(fill="x", padx=2, pady=1)
+            ctk.CTkButton(row, text="✕", command=lambda n=i: self._lib_remove(n),
+                          width=30, height=26, corner_radius=8, fg_color="transparent",
+                          hover_color=SURFACE_3, border_width=1, border_color=BORDER_STRONG,
+                          text_color=INK_2, font=("Segoe UI", 12)).pack(
+                side="right", anchor="n", padx=(6, 8), pady=6)
+            ctk.CTkLabel(row, text=entry["certo"], text_color=INK, width=130, anchor="w",
+                         font=("Segoe UI", 12, "bold")).pack(side="left", padx=(10, 6), pady=6)
+            ctk.CTkLabel(row, text="⟵  " + ", ".join(entry["erros"]), text_color=INK_3,
+                         anchor="w", justify="left", wraplength=380,
+                         font=("Segoe UI", 12)).pack(side="left", fill="x", expand=True, pady=6)
+
+    def _lib_add(self):
+        certo = self.lib_right.get().strip()
+        erros = [w.strip() for w in self.lib_wrong.get().split(",") if w.strip()]
+        if not certo or not erros:
+            self.status.configure(text="Biblioteca: preencha o que sai errado e o termo certo.")
+            return
+        novos = self.library.add(certo, erros)
+        self.lib_wrong.delete(0, "end")
+        self.lib_right.delete(0, "end")
+        self._render_library()
+        self.status.configure(
+            text=f"Biblioteca: {novos} variante(s) viram \"{certo}\"."
+            if novos else f"Biblioteca: essas variantes ja estavam em \"{certo}\".")
+
+    def _lib_remove(self, index: int):
+        certo = self.library.entries[index]["certo"]
+        self.library.remove(index)
+        self._render_library()
+        self.status.configure(text=f"Biblioteca: \"{certo}\" removido.")
 
     # -- callbacks de configuracao ------------------------------------------
     def _save(self):

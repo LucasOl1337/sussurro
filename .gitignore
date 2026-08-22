@@ -7,6 +7,7 @@ __pycache__/
 # locais da maquina: gravacoes de voz + transcricoes (PII) e preferencias
 history/
 settings.json
+library.json
 
 # logs
 *.log
