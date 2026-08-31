@@ -1424,6 +1424,196 @@ def render_hours(por_hora: dict, cell: int = 12, altura: int = 84, s: int = 2):
     return img, (w, h)
 
 
+class HistoryList(ctk.CTkFrame):
+    """Historico num canvas so. CTkFrame por linha trava o Tk uns 3s no restore
+    (Configure -> _draw em cada canvas); item de canvas pinta na hora."""
+
+    def __init__(self, master, font_mono, day_label, on_play, on_copy):
+        super().__init__(master, fg_color="transparent", width=1, height=1)
+        self.font_mono = font_mono
+        self.day_label = day_label
+        self.on_play = on_play
+        self.on_copy = on_copy
+        self._entries = []
+        self._width = 0
+        self._hits = []
+        self._hover = None
+        self._bg_ids = {}
+        self._hover_even = {}
+
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(self, bg=SURFACE, highlightthickness=0, bd=0,
+                                yscrollincrement=1)
+        self.sb = ctk.CTkScrollbar(self, orientation="vertical", command=self.canvas.yview,
+                                   fg_color="transparent")
+        self.canvas.configure(yscrollcommand=self.sb.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.sb.grid(row=0, column=1, sticky="ns")
+
+        self.canvas.bind("<Configure>", self._on_cfg)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", self._on_leave)
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.winfo_toplevel().bind_all("<MouseWheel>", self._on_wheel, add=True)
+
+    def set_entries(self, entries):
+        self._entries = list(entries)
+        if self._width >= 40:
+            self._redraw()
+
+    def _s(self, v):
+        return int(round(self._apply_widget_scaling(v)))
+
+    def _on_cfg(self, event):
+        if event.width == self._width or event.width < 40:
+            return
+        self._width = event.width
+        self._redraw()
+
+    def _pointer_over_canvas(self):
+        try:
+            x, y = self.winfo_pointerxy()
+            return self.winfo_containing(x, y) is self.canvas
+        except tk.TclError:
+            return False
+
+    def _on_wheel(self, event):
+        if not self._pointer_over_canvas():
+            return
+        if self.canvas.yview() != (0.0, 1.0):
+            self.canvas.yview("scroll", -int(event.delta / 6), "units")
+        return "break"
+
+    def _hit(self, x, y):
+        for h in self._hits:
+            if not (h["y0"] <= y < h["y1"]):
+                continue
+            px0, py0, px1, py1 = h["play"]
+            cx0, cy0, cx1, cy1 = h["copy"]
+            if px0 <= x <= px1 and py0 <= y <= py1:
+                return h, "play"
+            if cx0 <= x <= cx1 and cy0 <= y <= cy1:
+                return h, "copy"
+            tx0, ty0, tx1, ty1 = h["text"]
+            if tx0 <= x <= tx1 and ty0 <= y <= ty1:
+                return h, "text"
+            return h, "row"
+        return None, None
+
+    def _on_motion(self, event):
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        h, zone = self._hit(x, y)
+        self.canvas.configure(cursor="hand2" if zone in ("play", "copy", "text") else "")
+        idx = None if h is None else h["i"]
+        if idx == self._hover:
+            return
+        if self._hover is not None and self._hover in self._bg_ids:
+            even = self._hover_even.get(self._hover)
+            self.canvas.itemconfigure(self._bg_ids[self._hover],
+                                      fill=ROW_EVEN if even else SURFACE)
+        self._hover = idx
+        if idx is not None:
+            self.canvas.itemconfigure(self._bg_ids[idx], fill=ROW_WASH)
+
+    def _on_leave(self, _event):
+        self.canvas.configure(cursor="")
+        if self._hover is not None and self._hover in self._bg_ids:
+            even = self._hover_even.get(self._hover)
+            self.canvas.itemconfigure(self._bg_ids[self._hover],
+                                      fill=ROW_EVEN if even else SURFACE)
+        self._hover = None
+
+    def _on_click(self, event):
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        h, zone = self._hit(x, y)
+        if h is None:
+            return
+        entry = self._entries[h["i"]]
+        if zone == "play":
+            self.on_play(str(HISTORY_DIR / entry["wav"]))
+        elif zone in ("copy", "text"):
+            self.on_copy(entry["text"])
+
+    def _redraw(self):
+        frac = self.canvas.yview()[0]
+        self.canvas.delete("all")
+        self._hits = []
+        self._bg_ids = {}
+        self._hover_even = {}
+        self._hover = None
+        w = self._width
+        if w < 40:
+            return
+        s = self._s
+        padx, pady = s(8), s(7)
+        time_w, btn, gap = s(44), s(30), s(4)
+        btns_w = btn * 2 + gap + padx
+        y = s(4)
+        prev_day = None
+        day_i = 0
+        font_day = ("Segoe UI", 10, "bold")
+        font_time = (self.font_mono, 12)
+        font_text = ("Segoe UI", 12)
+        font_btn = ("Segoe UI", 12)
+        if not self._entries:
+            self.canvas.create_text(padx, y + s(6), text="Nenhum ditado ainda.",
+                                    fill=INK_3, anchor="nw", font=font_text)
+            self.canvas.configure(scrollregion=(0, 0, w, y + s(40)))
+            return
+        for i, entry in enumerate(self._entries):
+            dt = datetime.fromisoformat(entry["ts"])
+            day = self.day_label(dt)
+            if day != prev_day:
+                hid = self.canvas.create_text(padx, y, text=day, fill=INK_3,
+                                              anchor="nw", font=font_day)
+                hb = self.canvas.bbox(hid)
+                mid = (hb[1] + hb[3]) / 2
+                self.canvas.create_line(hb[2] + s(10), mid, w - padx, mid, fill=BORDER)
+                y = hb[3] + s(6)
+                prev_day = day
+                day_i = 0
+            even = day_i % 2 == 1
+            day_i += 1
+            base = ROW_EVEN if even else SURFACE
+            text_x = padx + time_w + s(6)
+            text_w = max(s(80), w - text_x - btns_w)
+            tid = self.canvas.create_text(
+                text_x, y + pady, text=entry["text"], fill=INK, anchor="nw",
+                width=text_w, font=font_text, justify="left")
+            tb = self.canvas.bbox(tid)
+            th = tb[3] - tb[1]
+            row_h = max(th, btn) + pady * 2
+            bg = self.canvas.create_rectangle(
+                s(2), y, w - s(2), y + row_h, fill=base, outline="", width=0)
+            self.canvas.tag_lower(bg, tid)
+            self.canvas.create_text(
+                padx, y + pady, text=dt.strftime("%H:%M"), fill=INK_3,
+                anchor="nw", font=font_time)
+            copy_x1 = w - padx
+            copy_x0 = copy_x1 - btn
+            play_x1 = copy_x0 - gap
+            play_x0 = play_x1 - btn
+            by = y + pady
+            self.canvas.create_text(
+                (play_x0 + play_x1) / 2, by + btn / 2, text="▶", fill=INK_2,
+                font=font_btn, anchor="center")
+            self.canvas.create_text(
+                (copy_x0 + copy_x1) / 2, by + btn / 2, text="⧉", fill=INK_2,
+                font=font_btn, anchor="center")
+            self._hits.append({
+                "i": i, "y0": y, "y1": y + row_h,
+                "play": (play_x0, y, play_x1, y + row_h),
+                "copy": (copy_x0, y, copy_x1, y + row_h),
+                "text": (text_x, y, play_x0 - s(4), y + row_h),
+            })
+            self._bg_ids[i] = bg
+            self._hover_even[i] = even
+            y += row_h + s(1)
+        self.canvas.configure(scrollregion=(0, 0, w, y + s(8)))
+        self.canvas.yview_moveto(frac)
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -1580,7 +1770,10 @@ class App:
         # card de conteudo: historico / ao vivo
         self.content = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
         self.content.pack(fill="both", expand=True, padx=18, pady=(0, 4))
-        self.hist_frame = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        self._playing = None
+        self.hist_frame = HistoryList(
+            self.content, font_mono=self.FONT_MONO, day_label=self._day_label,
+            on_play=self._play, on_copy=self._copy_entry)
         self.text = ctk.CTkTextbox(self.content, fg_color="transparent", text_color=INK,
                                    font=("Segoe UI", 13), wrap="word", border_width=0)
         self.library = self.transcriber.library
@@ -1600,7 +1793,6 @@ class App:
         self.bar = RecorderBar(root, lambda: self.settings["dot_pos"], self._save_bar_pos,
                                get_levels=lambda: self.transcriber.levels,
                                on_cancel=self._cancel, on_confirm=self._stop)
-        self._playing = None
 
         threading.Thread(target=self._load_model, daemon=True).start()
         root.after(100, self._poll)
@@ -1645,91 +1837,12 @@ class App:
     def _day_label(dt: datetime) -> str:
         return "HOJE" if dt.date() == date.today() else dt.strftime("%d/%m/%Y")
 
-    def _make_day_header(self, day: str):
-        hdr = ctk.CTkFrame(self.hist_frame, fg_color="transparent")
-        ctk.CTkLabel(hdr, text=day, text_color=INK_3, height=14,
-                     font=("Segoe UI", 10, "bold")).pack(side="left")
-        ctk.CTkFrame(hdr, fg_color=BORDER, height=1).pack(
-            side="left", fill="x", expand=True, padx=(10, 0))
-        return hdr
-
-    def _make_row(self, entry: dict, dt: datetime, base: str):
-        row = ctk.CTkFrame(self.hist_frame, fg_color=base, corner_radius=8)
-        time_lbl = ctk.CTkLabel(row, text=dt.strftime("%H:%M"), text_color=INK_3,
-                                width=44, font=(self.FONT_MONO, 12))
-        time_lbl.pack(side="left", anchor="n", padx=(8, 6), pady=7)
-        wav_path = HISTORY_DIR / entry["wav"]
-        btns = ctk.CTkFrame(row, fg_color="transparent")
-        btns.pack(side="right", anchor="n", padx=(6, 8), pady=6)
-        for glyph, cb in (("▶", lambda p=str(wav_path): self._play(p)),
-                          ("⧉", lambda t=entry["text"]: self._copy_entry(t))):
-            ctk.CTkButton(btns, text=glyph, command=cb, width=30, height=26,
-                          corner_radius=8, fg_color="transparent", hover_color=SURFACE_3,
-                          border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-                          font=("Segoe UI", 12)).pack(side="left", padx=(4, 0))
-        text_lbl = ctk.CTkLabel(row, text=entry["text"], text_color=INK, wraplength=452,
-                                justify="left", anchor="w", cursor="hand2",
-                                font=("Segoe UI", 12))
-        text_lbl.pack(side="left", fill="x", expand=True, pady=6)
-        text_lbl.bind("<Button-1>", lambda _e, t=entry["text"]: self._copy_entry(t))
-        enter = lambda _e, r=row: r.configure(fg_color=ROW_WASH)
-        leave = lambda _e, r=row, b=base: r.configure(fg_color=b)
-        for w in (row, time_lbl, text_lbl):
-            w.bind("<Enter>", enter)
-            w.bind("<Leave>", leave)
-        return row
-
     def _render_history(self):
-        """Reconstroi a lista inteira: so na abertura e ao mexer na Biblioteca.
-
-        Com ~70 entradas isto custa segundos (medido: 3-6 s no thread do Tk), entao
-        transcricao nova entra por _add_history, que cria uma linha so.
-        """
-        for child in self.hist_frame.winfo_children():
-            child.destroy()
-        self._hist_day = None      # dia do grupo do topo
-        self._hist_anchor = None   # linha antes da qual a proxima entrada e empacotada
-        self._hist_base = None     # cor da linha do topo, pra manter o zebrado
-        prev_day = None
-        i = 0
-        for entry in self.entries[:HIST_RENDER_MAX]:
-            dt = datetime.fromisoformat(entry["ts"])
-            day = self._day_label(dt)
-            if day != prev_day:
-                self._make_day_header(day).pack(fill="x", padx=8, pady=(12, 4))
-                prev_day = day
-                i = 0
-            base = "transparent" if i % 2 == 0 else ROW_EVEN
-            i += 1
-            row = self._make_row(entry, dt, base)
-            row.pack(fill="x", padx=2, pady=1)
-            if self._hist_anchor is None:  # primeira linha do grupo mais recente
-                self._hist_day, self._hist_anchor, self._hist_base = day, row, base
+        self.hist_frame.set_entries(self.entries[:HIST_RENDER_MAX])
 
     def _add_history(self, entry: dict):
-        """Insere a transcricao recem-chegada no topo, sem reconstruir a lista."""
         self.entries.insert(0, entry)
-        dt = datetime.fromisoformat(entry["ts"])
-        day = self._day_label(dt)
-        # pack_slaves da a ordem visual; winfo_children da a de criacao, que deixa de
-        # bater com a tela logo na primeira insercao no topo
-        filhos = self.hist_frame.pack_slaves()
-        topo = filhos[0] if filhos else None
-        if day != self._hist_day:  # primeira do dia: cabecalho novo acima de tudo
-            hdr = self._make_day_header(day)
-            if topo is None:
-                hdr.pack(fill="x", padx=8, pady=(12, 4))
-            else:
-                hdr.pack(fill="x", padx=8, pady=(12, 4), before=topo)
-            self._hist_day, self._hist_anchor, self._hist_base = day, topo, None
-        # alterna com a linha que estava no topo; nao reestampa o grupo inteiro
-        base = "transparent" if self._hist_base == ROW_EVEN else ROW_EVEN
-        row = self._make_row(entry, dt, base)
-        if self._hist_anchor is None:
-            row.pack(fill="x", padx=2, pady=1)
-        else:
-            row.pack(fill="x", padx=2, pady=1, before=self._hist_anchor)
-        self._hist_anchor, self._hist_base = row, base
+        self.hist_frame.set_entries(self.entries[:HIST_RENDER_MAX])
         self._stats_dirty = True
         if self._tab == "estatisticas":
             self._render_stats()
