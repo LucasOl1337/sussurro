@@ -55,10 +55,28 @@ _CANCEL = object()  # sentinela: joga fora o que estava em voo
 
 # Segmentacao (modo simultaneo): corta quando ha fala + >= TAIL_SILENCE_S de silencio.
 TAIL_SILENCE_S = 0.7
+# Pausa longa vira paragrafo. 0,7 s e respiracao — nao quebra o texto.
+PARAGRAPH_SILENCE_S = 1.5
 MAX_SEGMENT_S = 25.0
 MAX_IDLE_BUFFER_S = 30.0
 VAD_CHECK_EVERY_S = 0.3
 VAD_OPTIONS = VadOptions(min_silence_duration_ms=400, speech_pad_ms=200)
+
+# Clausula nova que o whisper capitaliza sem ponto. Texto intacto; so entra o ponto.
+_DISCOURSE_START = (
+    "Então", "Entao", "Depois", "Porque", "Agora", "Bom", "Olha",
+    "Além", "Alem", "Indo", "Enfim", "Inclusive", "Porém", "Porem",
+    "Portanto", "Beleza", "Respondendo",
+)
+_DISCOURSE_RE = re.compile(
+    r"([A-Za-záéíóúãõâêôçàèìòùÁÉÍÓÚÃÕÂÊÔÇÀÈÌÒÙ0-9])\s+(?=(?:%s)\b)"
+    % "|".join(_DISCOURSE_START)
+)
+# Quebra de linha antes da ancora falada; a ancora continua no texto.
+_LIST_ANCHOR_RE = re.compile(
+    r"(?<!\n)\s+(?=(?:Pergunta|Questão|Questao)\s+\d+|(?:Primeiro|Segundo|Terceiro)\b)"
+)
+_SENTENCE_END = frozenset(".!?:;…")
 
 # Paleta Asiimov (modo escuro) — skill ~/.claude/skills/asiimov
 BG = "#131417"
@@ -485,6 +503,66 @@ class Library:
         return "".join(out), len(trocas)
 
 
+def _fecha_frase(s: str) -> str:
+    """Ponto no fim se ainda nao ha pontuacao; virgula nao vira ponto."""
+    if not s or s[-1] in _SENTENCE_END or s[-1] in ",;":
+        return s
+    return s + "."
+
+
+def format_transcript(segments) -> str:
+    """Pontua e quebra o texto do whisper sem reescrever.
+
+    Pausa >= PARAGRAPH_SILENCE_S entre segmentos vira paragrafo. Segmento
+    seguinte com maiuscula ganha ponto se o anterior nao termina frase.
+    Depois, ponto antes de marcador de clausula e newline antes de ancora
+    de lista falada (Pergunta N, Questao N, Primeiro/Segundo/Terceiro).
+    """
+    pieces = []
+    prev_end = None
+    for seg in segments:
+        t = (seg.text or "").strip()
+        if not t:
+            continue
+        start, end = seg.start, seg.end
+        if not pieces:
+            pieces.append(t)
+            prev_end = end
+            continue
+        gap = start - prev_end if prev_end is not None else 0.0
+        if gap >= PARAGRAPH_SILENCE_S:
+            pieces[-1] = _fecha_frase(pieces[-1])
+            pieces.append("\n\n" + t)
+        else:
+            if t[0].isupper() and pieces[-1][-1] not in _SENTENCE_END and pieces[-1][-1] not in ",;":
+                pieces[-1] = _fecha_frase(pieces[-1])
+            pieces.append(" " + t)
+        prev_end = end
+    text = "".join(pieces)
+    if not text:
+        return ""
+    text = _DISCOURSE_RE.sub(r"\1. ", text)
+    text = _LIST_ANCHOR_RE.sub("\n", text)
+    return text
+
+
+def _join_session_text(parts) -> str:
+    """Junta trechos ja formatados. para=True (pausa longa) vira paragrafo."""
+    out = []
+    for item in parts:
+        t = item[1]
+        if not t:
+            continue
+        para = item[3] if len(item) > 3 else False
+        if not out:
+            out.append(t)
+        elif para:
+            out.append("\n\n" + t)
+        else:
+            out.append(" " + t)
+    return "".join(out).strip()
+
+
 class Transcriber:
     """Threads de captura, segmentacao (VAD) e transcricao. UI le da text_queue."""
 
@@ -510,6 +588,7 @@ class Transcriber:
         self._session_inject = False
         self._session_mode = "simultaneo"
         self._session_had_speech = False
+        self._session_emitted = False  # ja saiu texto nesta sessao (colar / ao vivo)
         self._session_id = 0          # cancelar/reiniciar invalida o que ficou em voo
         self._pending = 0             # trechos aceitos e ainda nao entregues
         self._pending_lock = threading.Lock()
@@ -663,6 +742,7 @@ class Transcriber:
         self._session_inject = inject
         self._session_mode = self.transcribe_mode
         self._session_had_speech = False
+        self._session_emitted = False
         self._session_started = datetime.now()
         self._session_id += 1
         self._session_parts = []
@@ -760,15 +840,18 @@ class Transcriber:
                     buffer = np.zeros(0, dtype=np.float32)
                     continue
                 if item is None:  # fim da gravacao: manda o que sobrou
-                    if buffer.size > SAMPLE_RATE // 4 and get_speech_timestamps(buffer, VAD_OPTIONS):
-                        self._enqueue_segment(buffer)
+                    speech = (get_speech_timestamps(buffer, VAD_OPTIONS)
+                              if buffer.size > SAMPLE_RATE // 4 else [])
+                    if speech:
+                        lead_s = speech[0]["start"] / SAMPLE_RATE
+                        self._enqueue_segment(buffer, lead_s)
                     elif not self._session_had_speech:
                         self.status_queue.put("Parado (sem fala detectada).")
                     else:
                         self.status_queue.put("Parado.")
                     self._drained = True  # nao vem mais trecho desta sessao
                     # marcador de fim de sessao (carimbado: cancelamento o invalida)
-                    self._segment_queue.put((None, None, None, self._session_id))
+                    self._segment_queue.put((None, None, None, self._session_id, 0.0))
                     buffer = np.zeros(0, dtype=np.float32)
                     continue
                 buffer = np.concatenate([buffer, item])
@@ -785,29 +868,30 @@ class Transcriber:
                         buffer = buffer[-SAMPLE_RATE:]
                     continue
                 last_end = speech[-1]["end"]
+                lead_s = speech[0]["start"] / SAMPLE_RATE
                 tail_silence = (buffer.size - last_end) / SAMPLE_RATE
                 if tail_silence >= TAIL_SILENCE_S:
-                    self._enqueue_segment(buffer[:last_end])
+                    self._enqueue_segment(buffer[:last_end], lead_s)
                     buffer = buffer[last_end:]
                 elif buffer.size > MAX_SEGMENT_S * SAMPLE_RATE:
-                    self._enqueue_segment(buffer)
+                    self._enqueue_segment(buffer, lead_s)
                     buffer = np.zeros(0, dtype=np.float32)
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
                 self.status_queue.put(f"ERRO na segmentacao: {e}")
                 buffer = np.zeros(0, dtype=np.float32)
 
-    def _enqueue_segment(self, audio: np.ndarray):
+    def _enqueue_segment(self, audio: np.ndarray, lead_s: float = 0.0):
         self._session_had_speech = True
         with self._pending_lock:
             self._pending += 1
         self._segment_queue.put((audio, self._session_inject, self._session_mode,
-                                 self._session_id))
+                                 self._session_id, lead_s))
 
     # -- transcricao --------------------------------------------------------
     def _transcribe_loop(self):
         while True:
-            audio, inject, mode, sid = self._segment_queue.get()
+            audio, inject, mode, sid, lead_s = self._segment_queue.get()
             # trecho real desta sessao: precisa dar baixa mesmo se a transcricao falhar
             deve_baixar = audio is not None and sid == self._session_id
             try:
@@ -824,21 +908,26 @@ class Transcriber:
                     # o whisper inventar "Nightingale" no lugar de "9router"
                     hotwords=self.library.hotwords,
                 )
-                text = "".join(s.text for s in segments).strip()
+                text = format_transcript(segments)
                 text, fixes = self.library.apply(text)  # troca da Biblioteca antes de sair daqui
                 if sid != self._session_id:
                     continue  # cancelado enquanto este trecho transcrevia
                 dt = time.perf_counter() - t0
-                self._session_parts.append((audio, text, fixes))
+                para = self._session_emitted and lead_s >= PARAGRAPH_SILENCE_S
+                self._session_parts.append((audio, text, fixes, para))
                 if text:
-                    self.text_queue.put(text)
+                    if self._session_emitted:
+                        payload = ("\n\n" if para else " ") + text
+                    else:
+                        payload = text
+                    self.text_queue.put(payload)
+                    self._session_emitted = True
                 # baixa aqui, antes de colar e de arquivar: o texto ja saiu, a barra nao
                 # tem mais o que mostrar — colar ainda leva ~0,45 s so restaurando o
                 # clipboard, e segurar a barra ate la e o que parecia travamento
                 self._pending_done()
                 deve_baixar = False
                 if text and inject:
-                    payload = text + (" " if mode == "simultaneo" else "")
                     if self.inject_method == "colar":
                         self._paste(payload)
                     else:
@@ -854,12 +943,12 @@ class Transcriber:
 
     def _finalize_session(self):
         parts, self._session_parts = self._session_parts, []
-        text = " ".join(t for _a, t, _f in parts if t).strip()
+        text = _join_session_text(parts)
         if not text:
             return
         started = self._session_started or datetime.now()
-        audio = np.concatenate([a for a, _t, _f in parts])
-        fixes = sum(f for _a, _t, f in parts)
+        audio = np.concatenate([a for a, _t, _f, *_ in parts])
+        fixes = sum(f for _a, _t, f, *_ in parts)
         HISTORY_DIR.mkdir(exist_ok=True)
         wav_name = started.strftime("%Y%m%d_%H%M%S") + ".wav"
         with wave.open(str(HISTORY_DIR / wav_name), "wb") as w:
@@ -2200,7 +2289,7 @@ class App:
         try:
             while True:
                 chunk = self.text_queue.get_nowait()
-                self.text.insert("end", chunk + " ")
+                self.text.insert("end", chunk)
                 self.text.see("end")
         except queue.Empty:
             pass

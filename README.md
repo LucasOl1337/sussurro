@@ -52,6 +52,7 @@ Na primeira execução o modelo `large-v3` é baixado pelo faster-whisper e depo
 - **Fonte** — `microfone` (entrada), `audio do PC` (o que está saindo nas caixas/fones, via loopback WASAPI) ou `os dois` (mistura mic + PC antes do VAD/whisper).
 - **Canal do PC** — qual saída capturar no modo `audio do PC` / `os dois`. `padrao do sistema` usa o dispositivo de reprodução atual do Windows. O combo fica desabilitado quando a fonte é só microfone.
 - **Transcrição** — `simultaneo`: trechos vão aparecendo conforme você pausa entre frases (corte por VAD após ~0,7 s de silêncio); `final`: acumula tudo e transcreve de uma vez ao parar.
+- **Formatação** — depois do whisper, o texto ganha ponto em cláusula nova e quebra de parágrafo em pausa longa (~1,5 s, não na respiração de 0,7 s) e uma linha nova antes de âncoras faladas (`Pergunta 7`, `Questão 12`, `Primeiro`/`Segundo`/`Terceiro`). Não reescreve nem tira “né/sabe”. Vale no colar, no histórico e no copiar. Ditados antigos ficam como estão.
 - **Envio** — `colar`: cola via Ctrl+V no campo onde o cursor estiver (o clipboard original é preservado — backup/restauração de todos os formatos); `digitar`: simula teclado.
 - **Idioma** — `pt`, `en` ou `auto`.
 - **Bolinha** — overlay sempre no topo, sem roubar foco e fora do Alt-Tab; laranja = gravando, invertida = transcrevendo. Arraste para reposicionar (a posição é salva como fração da área útil do monitor).
