@@ -1,11 +1,12 @@
 # venv do projeto: .venv (uv venv --python 3.11; uv pip install -r requirements.txt)
+# Windows e Linux (wheels NVIDIA distintos por plataforma; soundcard = WASAPI / Pulse).
 faster-whisper>=1.2
 sounddevice>=0.5
 numpy
 pynput>=1.8
 customtkinter>=6.0
 pillow
-# CUDA runtime do ctranslate2 (mesmas versoes validadas na maquina em 2026-08-21)
+# CUDA runtime do ctranslate2 (mesmas versoes validadas no Windows em 2026-08-21)
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.24.0.43
 soundcard>=0.4

@@ -1,18 +1,21 @@
 """Sussurro — voice-to-text local: mic -> Silero VAD -> faster-whisper large-v3 (CUDA).
 
 HUD Tkinter: gravar/parar, atalho global de mouse (digita onde o cursor estiver),
-fonte de captura (microfone, audio do PC via loopback WASAPI ou os dois misturados),
+fonte de captura (microfone, audio do PC via loopback ou os dois misturados),
 modo de transcricao (simultaneo por trecho ou tudo ao final).
+
+Windows e Linux (X11/Pulse ou PipeWire). CUDA continua obrigatorio.
 """
 
 import collections
 import ctypes
-import ctypes.wintypes as wintypes
 import json
 import math
 import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -21,9 +24,13 @@ import tkinter.font as tkfont
 import traceback
 import unicodedata
 import wave
-import winsound
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+IS_WIN = sys.platform == "win32"
+
+if IS_WIN:
+    import ctypes.wintypes as wintypes
 
 # Sob pythonw nao existe stdout/stderr; sem streams, print/traceback matam thread calados.
 if sys.stdout is None or sys.stderr is None:
@@ -31,14 +38,58 @@ if sys.stdout is None or sys.stderr is None:
     sys.stdout = sys.stdout or _log
     sys.stderr = sys.stderr or _log
 
-# As DLLs CUDA vem dos wheels da NVIDIA e nao entram sozinhas no caminho de busca
-# (sem isto: "Library cublas64_12.dll is not found" na hora de transcrever).
-_nvidia_dir = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
-for _sub in ("cublas", "cudnn", "cuda_nvrtc"):
-    _bin = _nvidia_dir / _sub / "bin"
-    if _bin.is_dir():
-        os.add_dll_directory(str(_bin))
-        os.environ["PATH"] = str(_bin) + os.pathsep + os.environ.get("PATH", "")
+
+def _prepare_cuda_libs():
+    """Expõe cublas/cudnn do wheel NVIDIA ao carregador nativo (DLL no Windows, .so no Linux)."""
+    dirs = []
+    for name in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
+        try:
+            mod = __import__(name, fromlist=["*"])
+        except ImportError:
+            continue
+        if getattr(mod, "__file__", None):
+            root = Path(mod.__file__).resolve().parent
+        elif getattr(mod, "__path__", None):
+            root = Path(next(iter(mod.__path__))).resolve()
+        else:
+            continue
+        for sub in ("bin", "lib", "lib64"):
+            d = root / sub
+            if d.is_dir():
+                dirs.append(d)
+    if not dirs:
+        nvidia = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+        if not nvidia.is_dir():
+            nvidia = (
+                Path(sys.prefix) / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages" / "nvidia"
+            )
+        for pkg in ("cublas", "cudnn", "cuda_nvrtc"):
+            for sub in ("bin", "lib", "lib64"):
+                d = nvidia / pkg / sub
+                if d.is_dir():
+                    dirs.append(d)
+    for d in dirs:
+        if IS_WIN:
+            os.add_dll_directory(str(d))
+            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+            continue
+        os.environ["LD_LIBRARY_PATH"] = str(d) + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
+        pending = [p for p in d.iterdir() if p.is_file() and ".so" in p.name]
+        for _ in range(4):
+            still = []
+            for so in pending:
+                try:
+                    ctypes.CDLL(str(so), mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    still.append(so)
+            if len(still) == len(pending):
+                break
+            pending = still
+
+
+_prepare_cuda_libs()
 
 import customtkinter as ctk
 import numpy as np
@@ -149,70 +200,116 @@ def save_settings(settings: dict):
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _hostapi_index() -> int:
+    """Host PortAudio do sistema: WASAPI no Windows; Pulse/ALSA/JACK no Linux."""
+    apis = list(sd.query_hostapis())
+    prefer = ("WASAPI",) if IS_WIN else ("PulseAudio", "Pulse", "ALSA", "JACK")
+    for needle in prefer:
+        for i, h in enumerate(apis):
+            if needle.lower() in h["name"].lower():
+                return i
+    default = sd.default.hostapi
+    if isinstance(default, int) and 0 <= default < len(apis):
+        return default
+    if not apis:
+        raise RuntimeError("PortAudio nao achou nenhum host de audio")
+    return 0
+
+
 def list_input_devices() -> dict:
-    """Nome -> indice, so entradas do host WASAPI (nomes completos, sem duplicata MME)."""
-    wasapi = next(i for i, h in enumerate(sd.query_hostapis()) if "WASAPI" in h["name"])
+    """Nome -> indice das entradas do host nativo (WASAPI / Pulse / ALSA)."""
+    host = _hostapi_index()
     return {
         d["name"]: d["index"]
         for d in sd.query_devices()
-        if d["max_input_channels"] > 0 and d["hostapi"] == wasapi
+        if d["max_input_channels"] > 0 and d["hostapi"] == host
     }
 
 
 def list_loopback_devices() -> dict:
-    """Nome -> indice, saidas WASAPI (capturaveis via loopback p/ pegar o audio do PC)."""
-    wasapi = next(i for i, h in enumerate(sd.query_hostapis()) if "WASAPI" in h["name"])
+    """Nome -> indice das fontes de audio do PC (saida WASAPI ou monitor Pulse/PipeWire)."""
+    host = _hostapi_index()
+    if IS_WIN:
+        return {
+            d["name"]: d["index"]
+            for d in sd.query_devices()
+            if d["max_output_channels"] > 0 and d["hostapi"] == host
+        }
+    found = {
+        d["name"]: d["index"]
+        for d in sd.query_devices()
+        if d["max_input_channels"] > 0 and d["hostapi"] == host
+        and re.search(r"monitor|loopback", d["name"], re.I)
+    }
+    if found:
+        return found
     return {
         d["name"]: d["index"]
         for d in sd.query_devices()
-        if d["max_output_channels"] > 0 and d["hostapi"] == wasapi
+        if d["max_output_channels"] > 0 and d["hostapi"] == host
     }
 
 
-# -- clipboard seguro (backup/restauracao pra colar sem sujar o clipboard) ----
-_u32 = ctypes.windll.user32
-_k32 = ctypes.windll.kernel32
-_u32.GetClipboardData.restype = wintypes.HANDLE
-_u32.SetClipboardData.restype = wintypes.HANDLE
-_u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-_k32.GlobalLock.restype = wintypes.LPVOID
-_k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-_k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-_k32.GlobalAlloc.restype = wintypes.HGLOBAL
-_k32.GlobalSize.restype = ctypes.c_size_t
-_k32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+# -- clipboard, cursor, area util --------------------------------------------
+if IS_WIN:
+    _u32 = ctypes.windll.user32
+    _k32 = ctypes.windll.kernel32
+    _u32.GetClipboardData.restype = wintypes.HANDLE
+    _u32.SetClipboardData.restype = wintypes.HANDLE
+    _u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    _k32.GlobalLock.restype = wintypes.LPVOID
+    _k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    _k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    _k32.GlobalAlloc.restype = wintypes.HGLOBAL
+    _k32.GlobalSize.restype = ctypes.c_size_t
+    _k32.GlobalSize.argtypes = [wintypes.HGLOBAL]
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
 
-CF_UNICODETEXT = 13
-GMEM_MOVEABLE = 0x0002
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
 
-
-class MONITORINFO(ctypes.Structure):
-    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
-                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
-
-
-_u32.MonitorFromPoint.restype = wintypes.HMONITOR
-_u32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    _u32.MonitorFromPoint.restype = wintypes.HMONITOR
+    _u32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    _SKIP_FORMATS = {2, 3, 9, 14}  # CF_BITMAP, CF_METAFILEPICT, CF_PALETTE, CF_ENHMETAFILE
+else:
+    _u32 = _k32 = None
+    _CLIP_READ = _CLIP_WRITE = None
+    if shutil.which("wl-copy") and shutil.which("wl-paste"):
+        _CLIP_READ, _CLIP_WRITE = ["wl-paste", "-n"], ["wl-copy"]
+    elif shutil.which("xclip"):
+        _CLIP_READ = ["xclip", "-selection", "clipboard", "-o"]
+        _CLIP_WRITE = ["xclip", "-selection", "clipboard"]
+    elif shutil.which("xsel"):
+        _CLIP_READ = ["xsel", "--clipboard", "--output"]
+        _CLIP_WRITE = ["xsel", "--clipboard", "--input"]
 
 
 def monitor_work_area(x: int, y: int):
-    """Area util (sem taskbar) do monitor que contem o ponto (x, y)."""
-    hmon = _u32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
-    mi = MONITORINFO()
-    mi.cbSize = ctypes.sizeof(MONITORINFO)
-    _u32.GetMonitorInfoW(hmon, ctypes.byref(mi))
-    r = mi.rcWork
-    return r.left, r.top, r.right, r.bottom
+    """Area util do monitor que contem o ponto (x, y). No Linux: tela Tk inteira."""
+    if IS_WIN:
+        hmon = _u32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        _u32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+        r = mi.rcWork
+        return r.left, r.top, r.right, r.bottom
+    root = tk._default_root
+    if root is None:
+        raise RuntimeError("monitor_work_area precisa da janela Tk")
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
 
 
 def cursor_pos():
-    pt = wintypes.POINT()
-    _u32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
-# formatos cujo dado NAO e HGLOBAL (handles GDI etc.) ou sao privados — nao da pra
-# copiar byte a byte; o Windows sintetiza CF_BITMAP a partir de CF_DIB, entao
-# imagens/screenshots sobrevivem mesmo pulando estes.
-_SKIP_FORMATS = {2, 3, 9, 14}  # CF_BITMAP, CF_METAFILEPICT, CF_PALETTE, CF_ENHMETAFILE
+    if IS_WIN:
+        pt = wintypes.POINT()
+        _u32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+    root = tk._default_root
+    if root is None:
+        raise RuntimeError("cursor_pos precisa da janela Tk")
+    return root.winfo_pointerx(), root.winfo_pointery()
 
 
 def _open_clipboard(retries: int = 15) -> bool:
@@ -224,7 +321,15 @@ def _open_clipboard(retries: int = 15) -> bool:
 
 
 def backup_clipboard():
-    """Copia todos os formatos HGLOBAL do clipboard. None = nao conseguiu abrir."""
+    """Windows: todos os formatos HGLOBAL. Linux: texto via wl-clipboard/xclip/xsel."""
+    if not IS_WIN:
+        if not _CLIP_READ:
+            return None
+        try:
+            r = subprocess.run(_CLIP_READ, capture_output=True, timeout=1, check=False)
+            return r.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
     if not _open_clipboard():
         return None
     data = []
@@ -250,7 +355,18 @@ def backup_clipboard():
 
 
 def restore_clipboard(data) -> None:
-    if data is None or not _open_clipboard():
+    if data is None:
+        return
+    if not IS_WIN:
+        if not _CLIP_WRITE:
+            return
+        blob = data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+        try:
+            subprocess.run(_CLIP_WRITE, input=blob, timeout=2, check=False, capture_output=True)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return
+    if not _open_clipboard():
         return
     try:
         _u32.EmptyClipboard()
@@ -266,6 +382,16 @@ def restore_clipboard(data) -> None:
 
 
 def set_clipboard_text(text: str) -> bool:
+    if not IS_WIN:
+        if not _CLIP_WRITE:
+            return False
+        try:
+            subprocess.run(
+                _CLIP_WRITE, input=text.encode("utf-8"), timeout=2, check=True, capture_output=True,
+            )
+            return True
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return False
     if not _open_clipboard():
         return False
     try:
@@ -286,7 +412,7 @@ def set_clipboard_text(text: str) -> bool:
 class StreamResampler:
     """Reamostra blocos continuos pra 16 kHz (interp linear com fase persistente).
 
-    Necessario porque WASAPI so abre na taxa nativa do dispositivo (44.1/48 kHz).
+    Necessario porque WASAPI/ALSA/Pulse muitas vezes so abrem na taxa nativa (44.1/48 kHz).
     """
 
     def __init__(self, src_rate: int, dst_rate: int = SAMPLE_RATE):
@@ -563,6 +689,41 @@ def _join_session_text(parts) -> str:
     return "".join(out).strip()
 
 
+def _open_loopback_mic(device_index: int | None, status_queue, label: str):
+    """Microfone virtual que escuta o que o PC toca. WASAPI no Windows, monitor no Linux."""
+    import soundcard as sc
+    if device_index is None:
+        if IS_WIN:
+            spk = sc.default_speaker()
+            return sc.get_microphone(id=spk.id, include_loopback=True)
+        mics = sc.all_microphones(include_loopback=True)
+        spk = sc.default_speaker()
+        for mic in mics:
+            if spk.id in mic.id or (spk.name and spk.name in mic.name):
+                return mic
+        monitors = [m for m in mics if "monitor" in m.id.lower() or "monitor" in m.name.lower()]
+        if monitors:
+            return monitors[0]
+        raise RuntimeError("nenhum monitor de audio do PC (PulseAudio/PipeWire)")
+    name = sd.query_devices(device_index)["name"]
+    try:
+        spk = sc.get_speaker(name)
+        return sc.get_microphone(id=spk.id, include_loopback=True)
+    except Exception:
+        try:
+            return sc.get_microphone(name, include_loopback=True)
+        except Exception:
+            spk = sc.default_speaker()
+            status_queue.put(f"{label}: canal '{name}' nao achado, usando padrao ({spk.name}).")
+            if IS_WIN:
+                return sc.get_microphone(id=spk.id, include_loopback=True)
+            mics = sc.all_microphones(include_loopback=True)
+            for mic in mics:
+                if spk.id in mic.id or (spk.name and spk.name in mic.name):
+                    return mic
+            raise RuntimeError(f"canal '{name}' nao achado e sem monitor padrao")
+
+
 class Transcriber:
     """Threads de captura, segmentacao (VAD) e transcricao. UI le da text_queue."""
 
@@ -660,19 +821,9 @@ class Transcriber:
                 self.levels.append(float(np.sqrt(np.mean(part * part))))
 
     def _loopback_loop(self, slot: int, label: str, device_index: int | None, handle):
-        """Captura o que o PC esta tocando (WASAPI loopback via soundcard)."""
+        """Captura o que o PC esta tocando (WASAPI loopback / monitor PulsePipeWire)."""
         try:
-            import soundcard as sc
-            if device_index is None:
-                spk = sc.default_speaker()
-            else:
-                name = sd.query_devices(device_index)["name"]
-                try:
-                    spk = sc.get_speaker(name)
-                except Exception:
-                    spk = sc.default_speaker()
-                    self.status_queue.put(f"{label}: canal '{name}' nao achado, usando padrao ({spk.name}).")
-            loop = sc.get_microphone(id=spk.id, include_loopback=True)
+            loop = _open_loopback_mic(device_index, self.status_queue, label)
         except Exception as e:
             self.status_queue.put(f"ERRO ({label}): {e}")
             return
@@ -1026,9 +1177,17 @@ class RecorderBar:
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.attributes("-transparentcolor", self.TRANSPARENT)
+        if IS_WIN:
+            self.win.attributes("-transparentcolor", self.TRANSPARENT)
+            canvas_bg = self.TRANSPARENT
+        else:
+            try:
+                self.win.wm_attributes("-type", "dock")
+            except tk.TclError:
+                pass
+            canvas_bg = self.PILL_BG
         self.canvas = tk.Canvas(self.win, width=self.W, height=self.H,
-                                bg=self.TRANSPARENT, highlightthickness=0, cursor="fleur")
+                                bg=canvas_bg, highlightthickness=0, cursor="fleur")
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag_move)
@@ -1036,7 +1195,8 @@ class RecorderBar:
         self.canvas.bind("<Motion>", self._hover)
         self.canvas.bind("<Leave>", lambda _e: self._set_hover(None))
         self.win.update_idletasks()
-        self._set_exstyle()
+        if IS_WIN:
+            self._set_exstyle()
         self.win.withdraw()
 
         self._state = None
@@ -1243,8 +1403,22 @@ class RecorderBar:
         d.arc(box, start, start + 100, fill=ACCENT, width=w)
 
 
+def _mouse_button_id(button) -> str | None:
+    name = getattr(button, "name", None)
+    if name in BUTTON_LABELS:
+        return name
+    value = getattr(button, "value", None)
+    if value == 2:
+        return "middle"
+    if value in (8, 6):
+        return "x1"
+    if value in (9, 7):
+        return "x2"
+    return None
+
+
 class MouseHotkey:
-    """Hook global de mouse. O botao configurado e suprimido do sistema e vira o atalho.
+    """Hook global de mouse. No Windows o botao e suprimido; no Linux o clique tambem chega ao app debaixo.
 
     Eventos sao empurrados na event_queue ("start"/"stop"/("captured", nome));
     quem consome e a UI, no thread do Tk.
@@ -1256,8 +1430,15 @@ class MouseHotkey:
         self.trigger_mode = trigger_mode
         self.capturing = False
         self.active = False  # sessao de gravacao iniciada pelo atalho
-        self._listener = mouse.Listener(win32_event_filter=self._filter)
-        self._listener.start()
+        try:
+            if IS_WIN:
+                self._listener = mouse.Listener(win32_event_filter=self._filter)
+            else:
+                self._listener = mouse.Listener(on_click=self._on_click)
+            self._listener.start()
+        except Exception as e:
+            self._listener = None
+            self.event_queue.put(("error", f"atalho de mouse indisponivel: {e}"))
 
     @staticmethod
     def _decode(msg, data):
@@ -1268,19 +1449,17 @@ class MouseHotkey:
             return ("x1" if xbtn == 1 else "x2"), msg == WM_XBUTTONDOWN
         return None, None
 
-    def _filter(self, msg, data):
-        button, pressed = self._decode(msg, data)
-        if button is None:
-            return True
+    def _handle(self, button: str, pressed: bool, suppress: bool):
         if self.capturing:
             if pressed:
                 self.capturing = False
                 self.button = button
                 self.event_queue.put(("captured", button))
-            self._listener.suppress_event()
+            if suppress:
+                self._listener.suppress_event()
+            return
         if button != self.button:
-            return True
-        # atalho configurado: nunca deixa vazar pro sistema (ex.: voltar/avancar no browser)
+            return
         if self.trigger_mode == "alternar":
             if pressed:
                 self.event_queue.put(("stop" if self.active else "start", None))
@@ -1292,7 +1471,23 @@ class MouseHotkey:
             elif not pressed and self.active:
                 self.active = False
                 self.event_queue.put(("stop", None))
-        self._listener.suppress_event()
+        if suppress:
+            self._listener.suppress_event()
+
+    def _filter(self, msg, data):
+        button, pressed = self._decode(msg, data)
+        if button is None:
+            return True
+        self._handle(button, pressed, suppress=True)
+        if button != self.button and not self.capturing:
+            return True
+        return True
+
+    def _on_click(self, _x, _y, button, pressed):
+        name = _mouse_button_id(button)
+        if name is None:
+            return
+        self._handle(name, pressed, suppress=False)
 
 
 # -- estatisticas -----------------------------------------------------------
@@ -1430,7 +1625,14 @@ def fmt_dur(segundos: float) -> str:
 
 
 def _pil_font(size: int):
-    for nome in ("segoeui.ttf", "arial.ttf"):
+    for nome in (
+        "segoeui.ttf", "arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ):
         try:
             return ImageFont.truetype(nome, size)
         except OSError:
@@ -1517,9 +1719,10 @@ class HistoryList(ctk.CTkFrame):
     """Historico num canvas so. CTkFrame por linha trava o Tk uns 3s no restore
     (Configure -> _draw em cada canvas); item de canvas pinta na hora."""
 
-    def __init__(self, master, font_mono, day_label, on_play, on_copy):
+    def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy):
         super().__init__(master, fg_color="transparent", width=1, height=1)
         self.font_mono = font_mono
+        self.font_ui = font_ui
         self.day_label = day_label
         self.on_play = on_play
         self.on_copy = on_copy
@@ -1544,7 +1747,10 @@ class HistoryList(ctk.CTkFrame):
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.bind("<Button-1>", self._on_click)
-        self.winfo_toplevel().bind_all("<MouseWheel>", self._on_wheel, add=True)
+        top = self.winfo_toplevel()
+        top.bind_all("<MouseWheel>", self._on_wheel, add=True)
+        top.bind_all("<Button-4>", self._on_wheel, add=True)
+        top.bind_all("<Button-5>", self._on_wheel, add=True)
 
     def set_entries(self, entries):
         self._entries = list(entries)
@@ -1570,8 +1776,19 @@ class HistoryList(ctk.CTkFrame):
     def _on_wheel(self, event):
         if not self._pointer_over_canvas():
             return
-        if self.canvas.yview() != (0.0, 1.0):
-            self.canvas.yview("scroll", -int(event.delta / 6), "units")
+        if self.canvas.yview() == (0.0, 1.0):
+            return "break"
+        delta = getattr(event, "delta", 0) or 0
+        num = getattr(event, "num", 0) or 0
+        if num == 4:
+            steps = -3
+        elif num == 5:
+            steps = 3
+        elif delta:
+            steps = -int(delta / 6)
+        else:
+            return "break"
+        self.canvas.yview("scroll", steps, "units")
         return "break"
 
     def _hit(self, x, y):
@@ -1641,10 +1858,10 @@ class HistoryList(ctk.CTkFrame):
         y = s(4)
         prev_day = None
         day_i = 0
-        font_day = ("Segoe UI", 10, "bold")
+        font_day = (self.font_ui, 10, "bold")
         font_time = (self.font_mono, 12)
-        font_text = ("Segoe UI", 12)
-        font_btn = ("Segoe UI", 12)
+        font_text = (self.font_ui, 12)
+        font_btn = (self.font_ui, 12)
         if not self._entries:
             self.canvas.create_text(padx, y + s(6), text="Nenhum ditado ainda.",
                                     fill=INK_3, anchor="nw", font=font_text)
@@ -1707,9 +1924,14 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("Sussurro")
-        icon_path = Path(__file__).with_name("assets") / "sussurro.ico"
-        if icon_path.exists():
-            root.iconbitmap(str(icon_path))
+        assets = Path(__file__).with_name("assets")
+        ico, png = assets / "sussurro.ico", assets / "sussurro.png"
+        if IS_WIN and ico.exists():
+            root.iconbitmap(str(ico))
+        if png.exists():
+            photo = tk.PhotoImage(file=str(png))
+            root.iconphoto(True, photo)
+            root._sussurro_icon = photo
         root.geometry("720x660")
 
         self.settings = load_settings()
@@ -1727,11 +1949,19 @@ class App:
             self.hotkey_queue, self.settings["mouse_button"], self.settings["trigger_mode"]
         )
 
-        self.FONT_DISPLAY = pick_font(
-            ["Bahnschrift SemiBold Condensed", "Bahnschrift SemiBold", "Bahnschrift"],
-            "Arial Narrow",
+        self.FONT_UI = pick_font(
+            ["Segoe UI", "Noto Sans", "DejaVu Sans", "Ubuntu", "Liberation Sans"],
+            "TkDefaultFont",
         )
-        self.FONT_MONO = pick_font(["Cascadia Mono", "JetBrains Mono"], "Consolas")
+        self.FONT_DISPLAY = pick_font(
+            ["Bahnschrift SemiBold Condensed", "Bahnschrift SemiBold", "Bahnschrift",
+             "Noto Sans Condensed", "DejaVu Sans"],
+            "Arial",
+        )
+        self.FONT_MONO = pick_font(
+            ["Cascadia Mono", "JetBrains Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Ubuntu Mono"],
+            "TkFixedFont",
+        )
         root.configure(fg_color=BG)
 
         # cabecalho: marca + modelo
@@ -1760,7 +1990,7 @@ class App:
             ctk.CTkButton(cmd, text=label, command=cb, width=104, height=40,
                           corner_radius=10, fg_color="transparent", hover_color=SURFACE_2,
                           border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-                          font=("Segoe UI", 13)).pack(side="left", padx=(8, 0))
+                          font=(self.FONT_UI, 13)).pack(side="left", padx=(8, 0))
 
         # card de configuracao: grade 3 colunas, rotulos caixa alta discretos
         card = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
@@ -1770,7 +2000,7 @@ class App:
 
         def cfg_label(text, r, c):
             ctk.CTkLabel(card, text=text, text_color=INK_3, anchor="w", height=14,
-                         font=("Segoe UI", 10, "bold")).grid(
+                         font=(self.FONT_UI, 10, "bold")).grid(
                 row=r, column=c, sticky="ew", padx=14, pady=((14, 0) if r == 0 else (10, 0)))
 
         def combo(values, current, command, r, c, bottom=0):
@@ -1780,7 +2010,7 @@ class App:
                                   button_color=SURFACE_2, button_hover_color=SURFACE_3,
                                   dropdown_fg_color=SURFACE_2, dropdown_hover_color=SURFACE_3,
                                   dropdown_text_color=INK, text_color=INK,
-                                  font=("Segoe UI", 12))
+                                  font=(self.FONT_UI, 12))
             box.set(current)
             box.grid(row=r, column=c, sticky="ew", padx=14, pady=(4, bottom))
             return box
@@ -1794,12 +2024,12 @@ class App:
         self.hotkey_var = tk.StringVar(value=BUTTON_LABELS[self.settings["mouse_button"]])
         ctk.CTkEntry(hk, textvariable=self.hotkey_var, state="readonly", height=30,
                      corner_radius=8, fg_color=SURFACE_2, border_color=BORDER,
-                     text_color=INK, font=("Segoe UI", 12)).grid(row=0, column=0, sticky="ew")
+                     text_color=INK, font=(self.FONT_UI, 12)).grid(row=0, column=0, sticky="ew")
         self.set_hotkey_btn = ctk.CTkButton(
             hk, text="Setar", command=self.capture_hotkey, width=56, height=30,
             corner_radius=8, fg_color="transparent", hover_color=SURFACE_2,
             border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-            font=("Segoe UI", 12))
+            font=(self.FONT_UI, 12))
         self.set_hotkey_btn.grid(row=0, column=1, padx=(6, 0))
         self.trigger = combo(["alternar", "segurar"], self.settings["trigger_mode"],
                              self._on_trigger, 1, 1)
@@ -1854,17 +2084,17 @@ class App:
                                    anchor="w", font=(self.FONT_MONO, 11))
         self.status.pack(side="left")
         ctk.CTkLabel(status_bar, text="barra: arraste pelo meio para reposicionar", text_color=INK_3,
-                     font=("Segoe UI", 10)).pack(side="right")
+                     font=(self.FONT_UI, 10)).pack(side="right")
 
         # card de conteudo: historico / ao vivo
         self.content = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
         self.content.pack(fill="both", expand=True, padx=18, pady=(0, 4))
         self._playing = None
         self.hist_frame = HistoryList(
-            self.content, font_mono=self.FONT_MONO, day_label=self._day_label,
-            on_play=self._play, on_copy=self._copy_entry)
+            self.content, font_mono=self.FONT_MONO, font_ui=self.FONT_UI,
+            day_label=self._day_label, on_play=self._play, on_copy=self._copy_entry)
         self.text = ctk.CTkTextbox(self.content, fg_color="transparent", text_color=INK,
-                                   font=("Segoe UI", 13), wrap="word", border_width=0)
+                                   font=(self.FONT_UI, 13), wrap="word", border_width=0)
         self.library = self.transcriber.library
         self.lib_tab = self._build_library_tab()
         self.stats_frame = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1943,10 +2173,17 @@ class App:
 
     def _play(self, path: str):
         if self._playing == path:
-            winsound.PlaySound(None, 0)
+            sd.stop()
             self._playing = None
             return
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        with wave.open(path, "rb") as w:
+            sr = w.getframerate()
+            nch = w.getnchannels()
+            raw = w.readframes(w.getnframes())
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        if nch > 1:
+            audio = audio.reshape(-1, nch)
+        sd.play(audio, sr)
         self._playing = path
 
     # -- estatisticas --------------------------------------------------------
@@ -1978,20 +2215,20 @@ class App:
         card.grid(row=row, column=col, sticky="nsew",
                   padx=(0 if col == 0 else 8, 0), pady=(0, 8))
         ctk.CTkLabel(card, text=rotulo, text_color=INK_3, anchor="w", height=12,
-                     font=("Segoe UI", 9, "bold")).pack(fill="x", padx=12, pady=(10, 0))
+                     font=(self.FONT_UI, 9, "bold")).pack(fill="x", padx=12, pady=(10, 0))
         ctk.CTkLabel(card, text=valor, text_color=INK, anchor="w",
                      font=(self.FONT_DISPLAY, 25)).pack(fill="x", padx=12, pady=(1, 0))
         ctk.CTkLabel(card, text=nota, text_color=INK_3, anchor="w", height=12,
-                     font=("Segoe UI", 10)).pack(fill="x", padx=12, pady=(0, 10))
+                     font=(self.FONT_UI, 10)).pack(fill="x", padx=12, pady=(0, 10))
 
     def _stats_titulo(self, parent, texto: str, nota: str = ""):
         head = ctk.CTkFrame(parent, fg_color="transparent")
         head.pack(fill="x", padx=12, pady=(10, 2))
         ctk.CTkLabel(head, text=texto, text_color=INK_3, height=12,
-                     font=("Segoe UI", 9, "bold")).pack(side="left")
+                     font=(self.FONT_UI, 9, "bold")).pack(side="left")
         if nota:
             ctk.CTkLabel(head, text=nota, text_color=INK_3, height=12,
-                         font=("Segoe UI", 10)).pack(side="right")
+                         font=(self.FONT_UI, 10)).pack(side="right")
 
     def _render_stats(self):
         """Redesenha a aba inteira a partir do historico em memoria."""
@@ -2001,7 +2238,7 @@ class App:
         if not self.entries:
             ctk.CTkLabel(self.stats_frame, text="Nenhum ditado ainda — grave alguma coisa "
                          "e os numeros aparecem aqui.", text_color=INK_3,
-                         font=("Segoe UI", 12)).pack(anchor="w", padx=10, pady=10)
+                         font=(self.FONT_UI, 12)).pack(anchor="w", padx=10, pady=10)
             return
         st = compute_stats(self.entries)
 
@@ -2043,10 +2280,10 @@ class App:
         img_leg, tam_leg = render_legend()
         self._leg_img = ctk.CTkImage(img_leg, size=tam_leg)
         ctk.CTkLabel(legenda, text="menos", text_color=INK_3, height=12,
-                     font=("Segoe UI", 10)).pack(side="left", padx=(26, 6))
+                     font=(self.FONT_UI, 10)).pack(side="left", padx=(26, 6))
         ctk.CTkLabel(legenda, image=self._leg_img, text="").pack(side="left")
         ctk.CTkLabel(legenda, text="mais", text_color=INK_3, height=12,
-                     font=("Segoe UI", 10)).pack(side="left", padx=(6, 0))
+                     font=(self.FONT_UI, 10)).pack(side="left", padx=(6, 0))
 
         horas = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=10)
         horas.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
@@ -2063,7 +2300,7 @@ class App:
             linha = ctk.CTkFrame(top, fg_color="transparent")
             linha.pack(fill="x", padx=12)
             ctk.CTkLabel(linha, text=palavra, text_color=INK_2, anchor="w", height=15,
-                         font=("Segoe UI", 12)).pack(side="left")
+                         font=(self.FONT_UI, 12)).pack(side="left")
             ctk.CTkLabel(linha, text=fmt_int(vezes), text_color=INK_3, anchor="e", height=15,
                          font=(self.FONT_MONO, 11)).pack(side="right")
         ctk.CTkLabel(top, text="", height=6).pack()
@@ -2078,15 +2315,15 @@ class App:
         form.grid_columnconfigure(0, weight=3)
         form.grid_columnconfigure(1, weight=2)
         ctk.CTkLabel(form, text="SAI ASSIM (separe variantes por virgula)", text_color=INK_3,
-                     anchor="w", height=14, font=("Segoe UI", 10, "bold")).grid(
+                     anchor="w", height=14, font=(self.FONT_UI, 10, "bold")).grid(
             row=0, column=0, sticky="ew", padx=(6, 0))
         ctk.CTkLabel(form, text="DEVE VIRAR", text_color=INK_3, anchor="w", height=14,
-                     font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+                     font=(self.FONT_UI, 10, "bold")).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         def field(placeholder, col):
             e = ctk.CTkEntry(form, placeholder_text=placeholder, height=30, corner_radius=8,
                              fg_color=SURFACE_2, border_color=BORDER, text_color=INK,
-                             placeholder_text_color=INK_3, font=("Segoe UI", 12))
+                             placeholder_text_color=INK_3, font=(self.FONT_UI, 12))
             e.grid(row=1, column=col, sticky="ew", padx=(6 if col == 0 else 8, 0), pady=(4, 0))
             e.bind("<Return>", lambda _ev: self._lib_add())
             return e
@@ -2096,7 +2333,7 @@ class App:
         ctk.CTkButton(form, text="Adicionar", command=self._lib_add, width=92, height=30,
                       corner_radius=8, fg_color="transparent", hover_color=SURFACE_2,
                       border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-                      font=("Segoe UI", 12)).grid(row=1, column=2, padx=(8, 6), pady=(4, 0))
+                      font=(self.FONT_UI, 12)).grid(row=1, column=2, padx=(8, 6), pady=(4, 0))
         self.lib_list = ctk.CTkScrollableFrame(wrap, fg_color="transparent")
         self.lib_list.pack(fill="both", expand=True)
         return wrap
@@ -2106,7 +2343,7 @@ class App:
             child.destroy()
         if not self.library.entries:
             ctk.CTkLabel(self.lib_list, text="Nenhuma palavra na biblioteca ainda.",
-                         text_color=INK_3, font=("Segoe UI", 12)).pack(anchor="w", padx=10, pady=10)
+                         text_color=INK_3, font=(self.FONT_UI, 12)).pack(anchor="w", padx=10, pady=10)
             return
         for i, entry in enumerate(self.library.entries):
             base = "transparent" if i % 2 == 0 else ROW_EVEN
@@ -2115,13 +2352,13 @@ class App:
             ctk.CTkButton(row, text="✕", command=lambda n=i: self._lib_remove(n),
                           width=30, height=26, corner_radius=8, fg_color="transparent",
                           hover_color=SURFACE_3, border_width=1, border_color=BORDER_STRONG,
-                          text_color=INK_2, font=("Segoe UI", 12)).pack(
+                          text_color=INK_2, font=(self.FONT_UI, 12)).pack(
                 side="right", anchor="n", padx=(6, 8), pady=6)
             ctk.CTkLabel(row, text=entry["certo"], text_color=INK, width=130, anchor="w",
-                         font=("Segoe UI", 12, "bold")).pack(side="left", padx=(10, 6), pady=6)
+                         font=(self.FONT_UI, 12, "bold")).pack(side="left", padx=(10, 6), pady=6)
             ctk.CTkLabel(row, text="⟵  " + ", ".join(entry["erros"]), text_color=INK_3,
                          anchor="w", justify="left", wraplength=380,
-                         font=("Segoe UI", 12)).pack(side="left", fill="x", expand=True, pady=6)
+                         font=(self.FONT_UI, 12)).pack(side="left", fill="x", expand=True, pady=6)
 
     def _lib_add(self):
         certo = self.lib_right.get().strip()
@@ -2279,6 +2516,8 @@ class App:
                     self.hotkey_var.set(BUTTON_LABELS[payload])
                     self._save()
                     self.status.configure(text=f"Atalho definido: {BUTTON_LABELS[payload]}.")
+                elif event == "error":
+                    self.status.configure(text=f"ERRO: {payload}")
                 elif event == "start":
                     if not self._start(inject=True):
                         self.hotkey.active = False  # falhou: nao deixa o estado do atalho preso
@@ -2311,9 +2550,10 @@ class App:
 
 
 if __name__ == "__main__":
-    # identidade propria na taskbar: sem isto o Windows agrupa sob o pythonw
-    # generico e mostra o icone do Python em vez do sussurro.ico da janela
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Lucas.Sussurro")
+    if IS_WIN:
+        # identidade propria na taskbar: sem isto o Windows agrupa sob o pythonw
+        # generico e mostra o icone do Python em vez do sussurro.ico da janela
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Lucas.Sussurro")
     ctk.set_appearance_mode("dark")
     root = ctk.CTk()
     App(root)
