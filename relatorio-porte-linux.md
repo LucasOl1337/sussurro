@@ -55,7 +55,9 @@ Isto é leitura de código e de APIs, não evidência de corrida no OMART.
 
 ## Commit
 
-Não enviado. Este turno não autoriza push ao GitHub.
+SHA do porte em `main`: `b4f5341a7c33b4b42c3d30a4f4aa87da0608a9c6`  
+Mensagem: `feat: porte do ditado para Windows e Linux`  
+Remoto: https://github.com/LucasOl1337/sussurro.git
 
 ## Arquivos tocados
 
