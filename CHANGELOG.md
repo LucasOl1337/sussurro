@@ -14,6 +14,13 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 - Barra de gravação no Hyprland: aparece no monitor onde o cursor está (antes ficava sempre no monitor do meio, porque o Tk em XWayland vê uma tela única e o ponteiro dele congela fora de janelas X). Agora pergunta ao socket do Hyprland. Módulo `sussurro_hypr.py`.
 - Barra de gravação sem o retângulo escuro atrás da cápsula: no Hyprland ela vira uma janela gerenciada (classe `SussurroBar`) e a regra `rounding` recorta os cantos.
+- Barra de gravação em X11 sem Hyprland: a janela é recortada na forma da cápsula pela extensão SHAPE (python-xlib, já instalado pelo pynput).
+- Coluna da hora no histórico medida na fonte real; com Xft ela encostava no texto.
+- Documentado que o Tk do Python do `uv` vem sem Xft (fontes bitmap); use o Python do sistema no Linux.
+
+### Site
+
+- Página em `docs/` (GitHub Pages) com vídeo de demonstração gravado numa bancada isolada, capturas de cada aba e comparação com o Wispr Flow.
 
 ## [0.2.0] — 2026-09-05
 

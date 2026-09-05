@@ -2,7 +2,7 @@
 
 Ditado local para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Tudo roda na sua máquina — nenhum áudio sai do computador.
 
-[Release v0.2.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.2.0) · [Changelog](CHANGELOG.md)
+[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.2.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.2.0) · [Changelog](CHANGELOG.md)
 
 O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper `large-v3` em CUDA (float16)**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 
@@ -49,6 +49,10 @@ python3.11 -m venv .venv
 ```
 
 As bibliotecas de CUDA (`cublas`, `cudnn`) vêm dos wheels da NVIDIA listados no `requirements.txt` (`nvidia-cublas-cu12` / `nvidia-cudnn-cu12`). No Windows o `app.py` registra `site-packages\nvidia\*\bin` via `os.add_dll_directory()` e prefixa o `PATH`. No Linux pré-carrega os `.so` em `nvidia/*/lib` (e `lib64`) — sem isso a transcrição falha com DLL/`.so` de cublas ausente. Se você instalar as dependências fora de um venv na raiz do projeto, garanta que esses pacotes estejam visíveis no ambiente usado para rodar.
+
+## Fontes no Linux: use o Python do sistema
+
+O Tk que vem com o CPython do `uv` (python-build-standalone) é compilado **sem Xft**: a interface sai com fontes bitmap, sem antialias. Crie o venv com o Python do sistema (`/usr/bin/python3`, com o `tk` da distro) e as fontes ficam certas. O `app.py` funciona do 3.11 ao 3.14.
 
 ## Omarchy / Hyprland
 

@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sussurro — ditado local em português</title>
+<meta name="description" content="Fale e o texto aparece onde o cursor estiver. Ditado local com Whisper large-v3 na sua GPU: grátis, open source, Windows e Linux. Nenhum áudio sai do seu computador.">
+<meta property="og:title" content="Sussurro — Fale. O texto aparece.">
+<meta property="og:description" content="Ditado local em português, grátis e open source. Nenhum áudio sai do seu computador.">
+<meta property="og:image" content="media/poster.jpg">
+<meta property="og:type" content="website">
+<link rel="icon" href="media/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#131417;--sf:#1b1c20;--sf2:#25262b;--sf3:#2f3036;--bd:#2f3036;--bds:#454750;
+  --ink:#f2f3f3;--ink2:#c3c6c8;--ink3:#9ba0a4;--acc:#f0500a;--acch:#d64708;--acct:#f07944;--gra:#16181a;
+  --max:1120px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,"Noto Sans","Segoe UI",system-ui,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+a{color:var(--acct);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* topo */
+.nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0}
+.brand{display:flex;align-items:center;gap:12px;font-weight:600;letter-spacing:.22em;font-size:14px;color:var(--ink)}
+.brand img{width:34px;height:34px;border-radius:9px}
+.nav .links{display:flex;gap:22px;font-size:14px;color:var(--ink3)}
+.nav .links a{color:var(--ink3)}.nav .links a:hover{color:var(--ink);text-decoration:none}
+.btn{display:inline-flex;align-items:center;gap:10px;padding:13px 22px;border-radius:12px;font-weight:600;font-size:15px;border:1px solid transparent;transition:.15s}
+.btn.acc{background:var(--acc);color:var(--gra)}.btn.acc:hover{background:var(--acch);text-decoration:none}
+.btn.ghost{border-color:var(--bds);color:var(--ink2)}.btn.ghost:hover{background:var(--sf2);text-decoration:none;color:var(--ink)}
+
+/* hero */
+.hero{padding:70px 0 40px;display:grid;grid-template-columns:1.05fr .95fr;gap:48px;align-items:center}
+.k{font-size:13px;letter-spacing:.26em;font-weight:600;color:var(--ink3);text-transform:uppercase;margin:0 0 18px}
+h1{font-size:clamp(44px,6.2vw,76px);line-height:1.02;letter-spacing:-.025em;margin:0 0 22px;font-weight:800}
+h1 b{color:var(--acc);font-weight:800}
+.lead{font-size:20px;color:var(--ink2);max-width:520px;margin:0 0 30px}
+.cta{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.cta small{color:var(--ink3);font-size:13px;width:100%;margin-top:4px}
+.video{position:relative;border-radius:16px;overflow:hidden;background:#000;border:1px solid var(--bd);box-shadow:0 30px 80px rgba(0,0,0,.45)}
+.video video{display:block;width:100%;height:auto}
+
+/* pilares */
+.pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:56px 0 0}
+.card{background:var(--sf);border:1px solid var(--bd);border-radius:16px;padding:26px 26px 24px}
+.card h3{margin:14px 0 8px;font-size:20px;letter-spacing:-.01em}
+.card p{margin:0;color:var(--ink3);font-size:15.5px}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 8px rgba(240,80,10,.14)}
+
+/* secoes */
+section{padding:84px 0 0}
+h2{font-size:clamp(30px,4vw,44px);line-height:1.08;letter-spacing:-.02em;margin:0 0 14px;font-weight:800}
+.sub{color:var(--ink3);font-size:18px;max-width:640px;margin:0 0 34px}
+.feat{display:grid;grid-template-columns:1fr 1fr;gap:44px;align-items:center;margin-top:40px}
+.feat.rev .shot{order:-1}
+.feat h3{font-size:26px;letter-spacing:-.015em;margin:0 0 10px}
+.feat p{color:var(--ink2);margin:0 0 12px}
+.feat ul{margin:12px 0 0;padding-left:18px;color:var(--ink2)}
+.feat li{margin:6px 0}
+.shot{border-radius:14px;overflow:hidden;border:1px solid var(--bd);background:var(--sf);box-shadow:0 24px 60px rgba(0,0,0,.4)}
+.shot img{display:block;width:100%;height:auto}
+.barwrap{background:var(--sf);border:1px solid var(--bd);border-radius:18px;padding:34px;display:grid;place-items:center}
+.barwrap img{max-width:520px;width:100%;height:auto}
+
+/* fluxo */
+.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:36px}
+.step{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:22px}
+.step .n{font-family:"JetBrains Mono",monospace;color:var(--acct);font-size:13px;margin-bottom:10px}
+.step h4{margin:0 0 6px;font-size:17px}.step p{margin:0;color:var(--ink3);font-size:14.5px}
+
+/* numeros */
+.nums{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:36px}
+.num{background:var(--sf2);border-radius:14px;padding:22px}
+.num b{display:block;font-size:34px;letter-spacing:-.02em;font-weight:800}
+.num span{color:var(--ink3);font-size:14px}
+
+/* comparacao */
+table{width:100%;border-collapse:collapse;margin-top:34px;background:var(--sf);border:1px solid var(--bd);border-radius:16px;overflow:hidden}
+th,td{padding:15px 18px;text-align:left;border-bottom:1px solid var(--bd);font-size:15.5px;vertical-align:top}
+th{color:var(--ink3);font-weight:600;font-size:13px;letter-spacing:.14em;text-transform:uppercase;background:var(--sf2)}
+tr:last-child td{border-bottom:0}
+td.y{color:var(--ink)}td.n{color:var(--ink3)}
+td:first-child{color:var(--ink2);width:34%}
+.foot-note{color:var(--ink3);font-size:13.5px;margin-top:12px}
+
+/* instalar */
+pre{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:20px 22px;overflow:auto;font-size:14px;line-height:1.6;color:var(--ink2);margin:0}
+pre .c{color:var(--ink3)}pre .a{color:var(--acct)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:30px}
+.two h4{margin:0 0 10px;font-size:14px;letter-spacing:.16em;color:var(--ink3);text-transform:uppercase}
+
+/* rodape */
+footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:var(--ink3);font-size:14px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.reveal{opacity:0;transform:translateY(14px);transition:opacity .6s ease,transform .6s ease}
+.reveal.in{opacity:1;transform:none}
+
+@media (max-width:900px){
+  .hero{grid-template-columns:1fr;padding-top:36px}
+  .pillars,.flow,.nums,.two{grid-template-columns:1fr 1fr}
+  .feat{grid-template-columns:1fr}.feat.rev .shot{order:0}
+  .nav .links{display:none}
+}
+@media (max-width:560px){.pillars,.flow,.nums,.two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="nav">
+    <a class="brand" href="#"><img src="media/logo.png" alt="">SUSSURRO</a>
+    <div class="links">
+      <a href="#como">Como funciona</a><a href="#recursos">Recursos</a><a href="#omarchy">Headset</a><a href="#compare">Comparar</a><a href="#instalar">Instalar</a>
+      <a href="https://github.com/LucasOl1337/sussurro">GitHub ↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <p class="k">Ditado local · Português · Windows e Linux</p>
+      <h1>Fale.<br>O texto <b>aparece</b>.</h1>
+      <p class="lead">Você fala, e a frase vai surgindo onde o cursor estiver, enquanto você ainda está falando. Tudo roda na sua máquina. Nenhum áudio sai do seu computador.</p>
+      <div class="cta">
+        <a class="btn acc" href="https://github.com/LucasOl1337/sussurro/releases">Baixar no GitHub</a>
+        <a class="btn ghost" href="https://github.com/LucasOl1337/sussurro">Ver o código</a>
+        <small>Grátis. Open source (MIT). Precisa de uma GPU NVIDIA.</small>
+      </div>
+    </div>
+    <div class="video">
+      <video controls playsinline preload="metadata" poster="media/poster.jpg">
+        <source src="media/sussurro-promo.mp4" type="video/mp4">
+      </video>
+    </div>
+  </header>
+
+  <div class="pillars">
+    <div class="card reveal"><div class="dot"></div><h3>100% local</h3><p>Whisper large-v3 rodando na sua GPU. Sem conta, sem nuvem, sem limite de palavras.</p></div>
+    <div class="card reveal"><div class="dot"></div><h3>Grátis e aberto</h3><p>Código no GitHub sob licença MIT. Sem assinatura, sem versão Pro, sem pegadinha.</p></div>
+    <div class="card reveal"><div class="dot"></div><h3>Feito pra escrever</h3><p>Transcrição simultânea, colagem no app que estiver em foco, biblioteca de termos e histórico com áudio.</p></div>
+  </div>
+
+  <section id="como">
+    <h2>Como funciona</h2>
+    <p class="sub">Um atalho no mouse liga a gravação. Uma barra discreta mostra a onda do áudio. Você para de falar e o texto já está colado.</p>
+    <div class="flow">
+      <div class="step reveal"><div class="n">01</div><h4>Aperte o atalho</h4><p>Botão lateral do mouse, atalho do teclado ou um gesto no headset.</p></div>
+      <div class="step reveal"><div class="n">02</div><h4>Fale normalmente</h4><p>O Silero VAD separa as frases pelo silêncio. Nada de gravar em blocos.</p></div>
+      <div class="step reveal"><div class="n">03</div><h4>Veja o texto surgir</h4><p>No modo simultâneo cada trecho é transcrito e colado enquanto o próximo é falado.</p></div>
+      <div class="step reveal"><div class="n">04</div><h4>Pronto</h4><p>Aperte de novo pra parar. A frase vai pro histórico, com o áudio, pra você reouvir.</p></div>
+    </div>
+    <div class="feat">
+      <div class="shot reveal"><img src="media/chat-cena.png" alt="Sussurro ditando dentro de um chat: a barra de gravação flutua sobre o campo de texto e a mensagem é enviada"></div>
+      <div>
+        <h3>A barra que fica no seu caminho, sem atrapalhar</h3>
+        <p>Uma cápsula de 152 por 40 pixels: cancelar, a onda do que o microfone está captando e confirmar. Sempre no topo, nunca rouba o foco, e aparece no monitor onde o cursor está.</p>
+        <p>Arraste pelo meio pra escolher onde ela fica. A posição é salva como fração da tela, então funciona em qualquer resolução.</p>
+        <div class="barwrap" style="margin-top:18px;padding:22px"><img src="media/barra.png" alt="Barra de gravação do Sussurro ampliada"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="recursos">
+    <h2>Mais que ditado</h2>
+    <p class="sub">O que você diz fica organizado, e o que o modelo erra você ensina uma vez só.</p>
+
+    <div class="feat">
+      <div>
+        <h3>Histórico com áudio</h3>
+        <p>Cada frase ditada fica guardada com o áudio original. Reouça, copie de novo, veja o dia inteiro em ordem.</p>
+        <ul><li>Agrupado por dia, com hora de cada trecho</li><li>Botão de tocar e de copiar em cada linha</li><li>Tudo em um arquivo local, sem sincronização com nada</li></ul>
+      </div>
+      <div class="shot reveal"><img src="media/tab-historico.png" alt="Aba Histórico do Sussurro"></div>
+    </div>
+
+    <div class="feat rev">
+      <div>
+        <h3>Biblioteca de termos</h3>
+        <p>O Whisper insiste em escrever "nove router" quando você diz 9Router? Cadastre a variante errada e o termo certo. A biblioteca corrige o texto antes de colar e ainda enviesa a decodificação do modelo pros seus termos.</p>
+        <ul><li>Comparação fonética, tolerante a pequenas variações</li><li>Vale pra nomes de produto, siglas e nomes de gente</li></ul>
+      </div>
+      <div class="shot reveal"><img src="media/tab-biblioteca.png" alt="Aba Biblioteca do Sussurro"></div>
+    </div>
+
+    <div class="feat">
+      <div>
+        <h3>Estatísticas</h3>
+        <p>Palavras ditadas, palavras por minuto, sequência de dias, tempo falado e quanto tempo você economizou em relação a digitar.</p>
+        <ul><li>Mapa de calor das últimas semanas</li><li>Hora do dia em que você mais dita</li><li>Palavras mais usadas e correções da biblioteca</li></ul>
+      </div>
+      <div class="shot reveal"><img src="media/tab-estatisticas.png" alt="Aba Estatísticas do Sussurro"></div>
+    </div>
+
+    <div class="nums">
+      <div class="num reveal"><b>~1,2 s</b><span>do fim da fala ao texto colado, num trecho de 30 s (RTX 4070 Ti Super)</span></div>
+      <div class="num reveal"><b>0</b><span>bytes de áudio enviados pra fora da sua máquina</span></div>
+      <div class="num reveal"><b>large-v3</b><span>o maior modelo Whisper, em float16 na sua GPU</span></div>
+      <div class="num reveal"><b>MIT</b><span>licença. Use, modifique, redistribua</span></div>
+    </div>
+  </section>
+
+  <section id="omarchy">
+    <h2>No Omarchy, o ditado sai do teclado</h2>
+    <p class="sub">Um gesto no headset liga a gravação. Você fala, o texto é colado e o Enter é apertado. Sem tocar no PC.</p>
+    <div class="feat">
+      <div class="shot reveal"><img src="media/tab-omarchy.png" alt="Aba Omarchy do Sussurro com os gestos do headset"></div>
+      <div>
+        <h3>Gestos no MCHOSE X9</h3>
+        <p>O fone só entrega ao PC volume, play e o áudio. Então o Sussurro lê o que dá pra ler: inverter a roda de volume rápido vira um gesto, e o toque duplo no mute é detectado pelo silêncio digital que o fone gera no microfone.</p>
+        <ul><li>Enter automático ao terminar de colar</li><li>Mic padrão segue o fone: X9 quando está em uso, outro mic quando ele dorme</li><li>Ajuste dos tempos, mic reserva e feed de eventos na própria aba</li><li>Perfis pra outros headsets em um arquivo só</li></ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="compare">
+    <h2>Sussurro ou Wispr Flow?</h2>
+    <p class="sub">O Wispr Flow é excelente e polido. A diferença é onde o seu áudio vai parar, e quanto isso custa por mês.</p>
+    <table>
+      <thead><tr><th></th><th>Sussurro</th><th>Wispr Flow</th></tr></thead>
+      <tbody>
+        <tr><td>Onde o áudio é processado</td><td class="y">Na sua GPU. Funciona sem internet.</td><td class="n">Na nuvem. Precisa de internet.</td></tr>
+        <tr><td>Preço</td><td class="y">Grátis, sem limite de palavras</td><td class="n">Grátis até 2.000 palavras/semana; Pro US$ 15/mês (US$ 12 no anual)</td></tr>
+        <tr><td>Código</td><td class="y">Aberto (MIT)</td><td class="n">Fechado</td></tr>
+        <tr><td>Sistemas</td><td class="y">Windows e Linux</td><td class="n">Mac, Windows, iPhone e Android. Sem Linux.</td></tr>
+        <tr><td>Conta e login</td><td class="y">Não tem</td><td class="n">Obrigatórios</td></tr>
+        <tr><td>Corrigir termos que o modelo erra</td><td class="y">Biblioteca fonética local</td><td class="n">Dicionário na conta</td></tr>
+        <tr><td>Histórico com áudio, estatísticas</td><td class="y">Sim, no seu disco</td><td class="n">Histórico na nuvem</td></tr>
+        <tr><td>Acionar pelo headset, Enter automático</td><td class="y">Sim (Omarchy / Hyprland)</td><td class="n">Não</td></tr>
+        <tr><td>Requisito</td><td class="n">GPU NVIDIA</td><td class="y">Qualquer máquina</td></tr>
+      </tbody>
+    </table>
+    <p class="foot-note">Dados do Wispr Flow conforme a página de preços e a documentação pública em setembro de 2026. Se algo mudou, <a href="https://github.com/LucasOl1337/sussurro/issues">abra um issue</a>.</p>
+  </section>
+
+  <section id="instalar">
+    <h2>Instalar</h2>
+    <p class="sub">Python 3.11 ou mais novo, GPU NVIDIA, e pronto. As bibliotecas CUDA vêm pelos wheels da NVIDIA.</p>
+    <div class="two">
+      <div><h4>Linux</h4><pre><span class="c"># clone e crie o ambiente</span>
+git clone https://github.com/LucasOl1337/sussurro
+cd sussurro
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+<span class="c"># rode</span>
+.venv/bin/python app.py</pre></div>
+      <div><h4>Windows</h4><pre><span class="c">:: clone e crie o ambiente</span>
+git clone https://github.com/LucasOl1337/sussurro
+cd sussurro
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+
+<span class="c">:: rode</span>
+.venv\Scripts\python app.py</pre></div>
+    </div>
+    <p class="foot-note">No Wayland, instale <code>wl-clipboard</code> e <code>wtype</code> pra colar. As regras de janela do Hyprland e a regra udev do headset estão em <a href="https://github.com/LucasOl1337/sussurro/tree/main/contrib/omarchy">contrib/omarchy</a>.</p>
+  </section>
+
+  <footer>
+    <div>Sussurro · feito por <a href="https://github.com/LucasOl1337">LucasOl1337</a> · MIT</div>
+    <div><a href="https://github.com/LucasOl1337/sussurro">GitHub</a> · <a href="https://github.com/LucasOl1337/sussurro/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/LucasOl1337/sussurro/issues">Issues</a></div>
+  </footer>
+</div>
+<script>
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.15});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+</script>
+</body>
+</html>

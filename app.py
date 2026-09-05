@@ -1394,6 +1394,8 @@ class RecorderBar:
         self.win.update_idletasks()
         if IS_WIN:
             self._set_exstyle()
+        else:
+            self._apply_shape()
         self.win.withdraw()
 
         self._state = None
@@ -1420,6 +1422,41 @@ class RecorderBar:
         set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_longlong]
         hwnd = _u32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
         set_long(hwnd, GWL_EXSTYLE, get_long(hwnd, GWL_EXSTYLE) | flags)
+
+    def _apply_shape(self):
+        """X11 sem Hyprland: recorta a janela na forma da capsula (extensao SHAPE).
+
+        O Tk nao tem transparencia por pixel; sem isto os cantos ficam um retangulo
+        escuro. No Hyprland o rounding da regra de janela ja faz esse recorte.
+        """
+        if self.hypr:
+            return
+        try:
+            from Xlib import display as xdisplay
+            from Xlib.ext import shape
+        except ImportError:
+            return
+        try:
+            d = xdisplay.Display()
+            if not d.has_extension("SHAPE"):
+                d.close()
+                return
+            xwin = d.create_resource_object("window", self.win.winfo_id())
+            pm = xwin.create_pixmap(self.W, self.H, 1)
+            gc = pm.create_gc(foreground=0, background=0)
+            pm.fill_rectangle(gc, 0, 0, self.W, self.H)
+            gc.change(foreground=1)
+            r = self.H // 2
+            pm.fill_arc(gc, 0, 0, self.H - 1, self.H - 1, 0, 360 * 64)
+            pm.fill_arc(gc, self.W - self.H, 0, self.H - 1, self.H - 1, 0, 360 * 64)
+            pm.fill_rectangle(gc, r, 0, self.W - 2 * r, self.H)
+            xwin.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, pm)
+            d.sync()
+            gc.free()
+            pm.free()
+            d.close()
+        except Exception:  # noqa: BLE001 — sem SHAPE a barra so fica retangular
+            pass
 
     # -- posicionamento ------------------------------------------------------
     def _target_xy(self):
@@ -2125,13 +2162,15 @@ class HistoryList(ctk.CTkFrame):
             return
         s = self._s
         padx, pady = s(8), s(7)
-        time_w, btn, gap = s(44), s(30), s(4)
+        btn, gap = s(30), s(4)
         btns_w = btn * 2 + gap + padx
         y = s(4)
         prev_day = None
         day_i = 0
         font_day = (self.font_ui, 10, "bold")
         font_time = (self.font_mono, 12)
+        # largura da hora medida na fonte real: com Xft a mono e mais larga que os 44 px fixos
+        time_w = max(s(44), tkfont.Font(font=font_time).measure("00:00") + s(8))
         font_text = (self.font_ui, 12)
         font_btn = (self.font_ui, 12)
         if not self._entries:
