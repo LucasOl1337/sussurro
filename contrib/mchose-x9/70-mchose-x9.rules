@@ -1,0 +1,2 @@
+# MCHOSE X9 (dongle 2.4G): deixa o usuario logado ler os botoes (roda de volume) para o daemon x9-sussurro
+SUBSYSTEM=="input", ATTRS{idVendor}=="3837", ATTRS{idProduct}=="6045", TAG+="uaccess"

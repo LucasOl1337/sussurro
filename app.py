@@ -786,6 +786,7 @@ class Transcriber:
         self._session_mode = "simultaneo"
         self._session_had_speech = False
         self._session_emitted = False  # ja saiu texto nesta sessao (colar / ao vivo)
+        self._session_auto_enter = False  # fone: aperta Enter depois da ultima colagem
         self._session_id = 0          # cancelar/reiniciar invalida o que ficou em voo
         self._pending = 0             # trechos aceitos e ainda nao entregues
         self._pending_lock = threading.Lock()
@@ -939,12 +940,14 @@ class Transcriber:
                 return
 
     def start(self, device_index: int | None, inject: bool,
-              capture_mode: str = "microfone", loopback_index: int | None = None):
+              capture_mode: str = "microfone", loopback_index: int | None = None,
+              auto_enter: bool = False):
         if self.recording.is_set():
             return
         if self.busy():
             raise RuntimeError("Aguarde o ditado anterior terminar.")
         self._session_inject = inject
+        self._session_auto_enter = auto_enter
         self._session_mode = self.transcribe_mode
         self._session_had_speech = False
         self._session_emitted = False
@@ -1118,6 +1121,9 @@ class Transcriber:
                     continue  # sessao cancelada ou substituida: descarta sem colar nada
                 if audio is None:  # fim de sessao: grava no historico
                     try:
+                        if self._session_auto_enter and self._session_emitted and inject:
+                            self._press_enter()
+                        self._session_auto_enter = False
                         self._finalize_session()
                     finally:
                         if sid == self._session_id:
@@ -1239,6 +1245,23 @@ class Transcriber:
             timer.daemon = True
             self._clipboard_timer = timer
             timer.start()
+
+    def arm_auto_enter(self):
+        """Gesto do fone chegou no meio da sessao (ex.: parou por ele): confirma com Enter no fim."""
+        self._session_auto_enter = True
+
+    def _press_enter(self):
+        """Modo fone: confirma o envio da frase com Enter depois da ultima colagem."""
+        time.sleep(0.15)  # o app alvo precisa processar o Ctrl+V antes do Enter
+        if _is_wayland() and shutil.which("wtype"):
+            try:
+                r = subprocess.run(["wtype", "-k", "Return"], timeout=2, check=False, capture_output=True)
+                if r.returncode == 0:
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self._keyboard.press(keyboard.Key.enter)
+        self._keyboard.release(keyboard.Key.enter)
 
     def _send_paste_key(self) -> bool:
         """No Wayland o pynput nao injeta tecla no app focado; wtype sim."""
@@ -1598,8 +1621,11 @@ class IpcServer(threading.Thread):
                 pass
 
     def _handle(self, data: str) -> str:
-        if data in ("toggle", "start", "stop"):
-            self.event_queue.put((data, None))
+        # "toggle-enter"/"start-enter"/"stop-enter": veio do fone (daemon x9-sussurro);
+        # ao terminar de colar, o Sussurro aperta Enter para confirmar o envio.
+        base, _, flag = data.partition("-")
+        if base in ("toggle", "start", "stop") and flag in ("", "enter"):
+            self.event_queue.put((base, {"enter": True} if flag == "enter" else None))
             return "ok\n"
         if data == "status":
             if self.transcriber is None:
@@ -1609,6 +1635,11 @@ class IpcServer(threading.Thread):
                                "recording": t.recording.is_set(), "busy": t.busy(),
                                "model": "large-v3", "device": "cuda", "compute_type": "float16"}) + "\n"
         return "err unknown\n"
+
+
+def _wants_enter(payload) -> bool:
+    """Evento veio do fone (IPC *-enter): confirmar a frase com Enter ao final."""
+    return bool(payload) and isinstance(payload, dict) and bool(payload.get("enter"))
 
 
 class MouseHotkey:
@@ -2646,7 +2677,7 @@ class App:
             return None  # None + loopback = saida padrao do sistema
         return self.loopback_devices[name]
 
-    def _start(self, inject: bool):
+    def _start(self, inject: bool, auto_enter: bool = False):
         if self.transcriber.model is None:
             self.status.configure(text="Modelo ainda carregando — aguarde.")
             return False
@@ -2655,6 +2686,7 @@ class App:
                 self._device_index(), inject,
                 capture_mode=self.settings["capture_mode"],
                 loopback_index=self._pc_device_index(),
+                auto_enter=auto_enter,
             )
         except Exception as e:
             fonte = self.settings["capture_mode"]
@@ -2735,14 +2767,18 @@ class App:
                 elif event == "error":
                     self.status.configure(text=f"ERRO: {payload}")
                 elif event == "start":
-                    if not self._start(inject=True):
+                    if not self._start(inject=True, auto_enter=_wants_enter(payload)):
                         self.hotkey.active = False  # falhou: nao deixa o estado do atalho preso
                 elif event == "stop":
+                    if _wants_enter(payload):
+                        self.transcriber.arm_auto_enter()
                     self._stop()
                 elif event == "toggle":
                     if self.transcriber.recording.is_set():
+                        if _wants_enter(payload):
+                            self.transcriber.arm_auto_enter()
                         self._stop()
-                    elif not self._start(inject=True):
+                    elif not self._start(inject=True, auto_enter=_wants_enter(payload)):
                         self.hotkey.active = False
         except queue.Empty:
             pass

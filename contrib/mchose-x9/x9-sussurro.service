@@ -1,0 +1,13 @@
+[Unit]
+Description=MCHOSE X9 -> Sussurro (toque duplo no mute + mic padrao automatico)
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/home/lol/.local/bin/x9-sussurro
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

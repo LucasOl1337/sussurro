@@ -20,11 +20,11 @@ def cli(argv: list[str]) -> bool:
     if len(argv) < 2:
         return False
     cmd = argv[1].lower()
-    usage = "uso: sussurro [toggle|start|stop|status]"
+    usage = "uso: sussurro [toggle|start|stop|status|toggle-enter|start-enter|stop-enter]\n  *-enter: ao terminar, aperta Enter (uso pelo fone)"
     if cmd in ("-h", "--help"):
         print(usage)
         raise SystemExit(0)
-    if cmd not in ("toggle", "start", "stop", "status"):
+    if cmd not in ("toggle", "start", "stop", "status", "toggle-enter", "start-enter", "stop-enter"):
         print(usage, file=sys.stderr)
         raise SystemExit(2)
     try:
