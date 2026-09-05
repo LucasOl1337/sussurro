@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""x9-sussurro: integra o headset MCHOSE X9 com o Sussurro.
+
+O X9 nao envia o botao de mute do microfone ao PC; ele apenas zera o audio
+do mic (silencio digital exato). Este daemon observa o fluxo do mic do X9 e:
+
+  1. Toque duplo no mute (mute + desmute, ate TAP_MAX s de mic zerado)
+     -> envia "toggle" ao Sussurro. O mic volta ao estado anterior.
+     Mute longo (segurar mutado) continua sendo so mute.
+
+  2. Escolhe o microfone padrao do sistema (que o Sussurro usa via "pipewire"):
+     X9 com audio ativo      -> padrao = X9
+     X9 mutado/desligado     -> padrao = FIFINE (apos IDLE_SWITCH s)
+
+Assinatura observada de um toque duplo no X9:
+    ZERO (0.7-5 s)  ->  som ~0.9 s  ->  ZERO ~1.5 s (aviso de voz do fone)  ->  som
+O segundo ZERO e ignorado pela assinatura (gap <= BLIP_MAX_GAP e dur <= BLIP_MAX_DUR).
+ZEROs separados por menos de MERGE_GAP sao tratados como um so.
+
+Logs vao para o journal:  journalctl --user -u x9-sussurro -f
+"""
+
+import os
+import select
+import socket
+import struct
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+SRC_X9 = "alsa_input.usb-C-Media_Electronics_Inc_MCHOSE_X9_0123456789AB-01.mono-fallback"
+SRC_FALLBACK = "alsa_input.usb-3142_FIFINE_Microphone-00.mono-fallback"
+IPC_SOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "sussurro.sock"
+
+RATE = 16000
+CHUNK_MS = 25
+CHUNK_BYTES = RATE * 2 * CHUNK_MS // 1000  # s16 mono
+
+TAP_MIN = 0.05        # s: ZERO mais curto que isso e ruido de leitura
+TAP_MAX = 7.0         # s: ZERO ate isso = toque duplo; acima = mute de verdade (nada a fazer)
+MERGE_GAP = 0.3       # s: ZEROs separados por menos que isso sao o mesmo gesto
+BLIP_MAX_GAP = 1.3    # s: o aviso de voz do fone gera um 2o ZERO que comeca ate isso apos o anterior...
+BLIP_MAX_DUR = 2.0    # s: ...e dura no maximo isso. So essa assinatura e ignorada.
+DEBOUNCE = 2.0        # s: intervalo minimo entre dois toggles
+IDLE_SWITCH = 10.0    # s: X9 em ZERO/sem dados por tanto tempo -> padrao = FIFINE
+ACTIVE_SWITCH = 0.5   # s: X9 com som por tanto tempo -> padrao = X9
+NODATA_TIMEOUT = 0.5  # s: sem chunks do parec = fone desligado/dormindo
+
+# Roda de volume: inverter a direcao rapido (vol+ -> vol- ou vol- -> vol+) = toggle do Sussurro.
+# Girar normal em uma direcao nunca dispara. Precisa da regra udev 70-mchose-x9.rules (uaccess).
+WHEEL_DEVICE_NAME = "C-Media Electronics Inc MCHOSE X9 Consumer Control"
+REVERSAL_WINDOW = 0.5  # s: inversao de direcao dentro desse tempo = gesto
+KEY_VOLUMEDOWN, KEY_VOLUMEUP = 114, 115
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def sussurro(cmd: str) -> str:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.5)
+            s.connect(str(IPC_SOCK))
+            s.sendall((cmd + "\n").encode())
+            return s.recv(4096).decode("utf-8", "replace").strip()
+    except (OSError, socket.timeout) as e:
+        return f"erro: {e}"
+
+
+def default_source() -> str:
+    try:
+        return subprocess.run(["pactl", "get-default-source"], capture_output=True,
+                              text=True, timeout=3).stdout.strip()
+    except Exception:
+        return ""
+
+
+_default_cache = {"name": None, "at": 0.0}
+
+
+def set_default_source(name: str):
+    """So consulta o pactl a cada 10 s; entre consultas confia no que foi definido."""
+    now = time.time()
+    if _default_cache["name"] is None or now - _default_cache["at"] > 10:
+        _default_cache["name"], _default_cache["at"] = default_source(), now
+    if _default_cache["name"] == name:
+        return
+    r = subprocess.run(["pactl", "set-default-source", name], capture_output=True, text=True, timeout=3)
+    _default_cache["name"], _default_cache["at"] = name, now
+    log("mic padrao ->", name.split("usb-")[-1].split("-0")[0], "" if r.returncode == 0 else r.stderr.strip())
+
+
+class Gestos:
+    """Decide o que fazer com cada trecho de mic zerado."""
+
+    def __init__(self):
+        self.zero_start = None     # inicio do ZERO em andamento
+        self.pending = None        # (inicio, fim) de um ZERO encerrado, aguardando MERGE_GAP
+        self.last_zero_end = 0.0   # fim do ultimo ZERO ja decidido
+        self.last_toggle = 0.0
+
+    def zero_began(self, now):
+        if self.pending and now - self.pending[1] < MERGE_GAP:
+            self.zero_start = self.pending[0]      # continuacao do mesmo gesto
+            self.pending = None
+        else:
+            self.zero_start = now
+
+    def zero_ended(self, now):
+        if self.zero_start is not None:
+            self.pending = (self.zero_start, now)
+            self.zero_start = None
+
+    def tick(self, now):
+        """Chamado a cada loop; decide o ZERO pendente depois que o som se manteve MERGE_GAP."""
+        if not self.pending or now - self.pending[1] < MERGE_GAP:
+            return
+        start, end = self.pending
+        self.pending = None
+        dur = end - start
+        since_prev = start - self.last_zero_end
+        self.last_zero_end = end
+        if since_prev < BLIP_MAX_GAP and dur <= BLIP_MAX_DUR:
+            log(f"ZERO de {dur:.2f}s ignorado (aviso do fone, {since_prev:.2f}s apos o anterior)")
+        elif dur > TAP_MAX:
+            log(f"desmutou apos {dur:.1f}s (mute longo, nada a fazer)")
+        elif dur < TAP_MIN:
+            log(f"ZERO de {dur:.3f}s ignorado (curto demais)")
+        else:
+            self.toggle(end, f"TOQUE DUPLO no mute ({dur:.2f}s)")
+
+    def toggle(self, now, why):
+        """Toggle do Sussurro com debounce, usado pelo mute e pela roda."""
+        if now - self.last_toggle < DEBOUNCE:
+            log(f"{why} ignorado (debounce)")
+            return
+        self.last_toggle = now
+        resp = sussurro("toggle-enter")  # *-enter: Sussurro aperta Enter ao terminar de colar
+        log(f"{why} -> sussurro toggle: {resp}")
+
+
+def find_event_device(name: str):
+    try:
+        blocks = open("/proc/bus/input/devices").read().split("\n\n")
+    except OSError:
+        return None
+    for b in blocks:
+        if f'N: Name="{name}"' in b:
+            for tok in b.split():
+                if tok.startswith("event"):
+                    return "/dev/input/" + tok
+    return None
+
+
+def wheel_loop(g: "Gestos"):
+    """Thread: le a roda de volume do X9 e dispara no ziguezague rapido."""
+    while True:
+        dev = find_event_device(WHEEL_DEVICE_NAME)
+        if not dev:
+            time.sleep(5)
+            continue
+        try:
+            fd = os.open(dev, os.O_RDONLY)
+        except OSError as e:
+            log(f"roda: sem acesso a {dev} ({e}); regra udev 70-mchose-x9.rules instalada?")
+            time.sleep(10)
+            continue
+        log("escutando a roda de volume em", dev)
+        last_dir, last_t = None, 0.0
+        try:
+            while True:
+                d = os.read(fd, 24)
+                if len(d) < 24:
+                    break
+                _sec, _usec, typ, code, val = struct.unpack("qqHHi", d)
+                if typ != 1 or val != 1 or code not in (KEY_VOLUMEDOWN, KEY_VOLUMEUP):
+                    continue
+                now = time.time()
+                if last_dir is not None and code != last_dir and now - last_t < REVERSAL_WINDOW:
+                    g.toggle(now, f"RODA inverteu em {now - last_t:.2f}s")
+                last_dir, last_t = code, now
+        except OSError as e:
+            log("roda:", e)
+        finally:
+            os.close(fd)
+        time.sleep(3)
+
+
+def run_once(g: "Gestos"):
+    parec = subprocess.Popen(
+        ["parec", f"--device={SRC_X9}", "--format=s16le", f"--rate={RATE}", "--channels=1",
+         "--raw", "--latency-msec=20"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    fd = parec.stdout.fileno()
+    os.set_blocking(fd, False)
+
+    state = None            # "SOM" | "ZERO" | "NODATA"
+    state_since = time.time()
+    buf = b""
+    log("escutando o mic do X9")
+
+    while True:
+        r, _, _ = select.select([fd], [], [], NODATA_TIMEOUT)
+        now = time.time()
+        if r:
+            data = os.read(fd, 65536)
+            if not data:
+                log("parec encerrou (dispositivo sumiu?)")
+                break
+            buf += data
+            new = None
+            while len(buf) >= CHUNK_BYTES:
+                chunk, buf = buf[:CHUNK_BYTES], buf[CHUNK_BYTES:]
+                new = "SOM" if any(chunk) else "ZERO"
+            if new is None:
+                continue
+        else:
+            new = "NODATA"
+
+        if new != state:
+            if new == "ZERO":
+                g.zero_began(now)
+            elif state == "ZERO":
+                g.zero_ended(now)
+            if new == "NODATA":
+                log("sem dados do X9 (desligado/dormindo?)")
+            state, state_since = new, now
+
+        g.tick(now)
+
+        held = now - state_since
+        if state == "SOM" and held >= ACTIVE_SWITCH:
+            set_default_source(SRC_X9)
+        elif state in ("ZERO", "NODATA") and held >= IDLE_SWITCH:
+            set_default_source(SRC_FALLBACK)
+
+    parec.kill()
+    set_default_source(SRC_FALLBACK)
+
+
+def main():
+    g = Gestos()
+    threading.Thread(target=wheel_loop, args=(g,), daemon=True).start()
+    while True:
+        try:
+            run_once(g)
+        except Exception as e:  # noqa: BLE001
+            log("erro:", e)
+        time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()

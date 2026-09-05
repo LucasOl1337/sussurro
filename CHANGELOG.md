@@ -2,6 +2,12 @@
 
 As mudanças de cada versão do Sussurro são registradas aqui. As versões seguem o formato `MAJOR.MINOR.PATCH`.
 
+## [Não lançado]
+
+### Adicionado
+
+- Comandos `toggle-enter`, `start-enter` e `stop-enter` por socket local: a sessão termina apertando Enter depois da última colagem, confirmando o envio da frase. Usados pelo daemon `x9-sussurro`, que aciona o ditado pelo headset MCHOSE X9 (inversão rápida da roda de volume), para ditar longe do PC. O daemon, a unit systemd, a regra udev e o passo a passo estão em `contrib/mchose-x9/`.
+
 ## [0.2.0] — 2026-09-05
 
 Suporte ao Linux e correções de latência na captura, no atalho e na colagem. O modelo permanece `large-v3`, CUDA, `float16`, com `beam_size=5`.
