@@ -2,6 +2,8 @@
 
 Ditado local para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Tudo roda na sua máquina — nenhum áudio sai do computador.
 
+[Release v0.2.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.2.0) · [Changelog](CHANGELOG.md)
+
 O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper `large-v3` em CUDA (float16)**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 
 ## Requisitos
@@ -10,7 +12,7 @@ O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → f
 - Python 3.11
 - GPU NVIDIA (o modelo carrega com `device="cuda", compute_type="float16"`; sem GPU o modelo não sobe neste código)
 - Microfone qualquer (a captura tenta 16 kHz e, se o dispositivo não aceitar, reamostra da taxa nativa)
-- Linux, para colar via clipboard: `wl-clipboard` (Wayland) ou `xclip`/`xsel` (X11). Sem isso o envio `colar` cai no modo `digitar`.
+- Linux, para colar via clipboard: `wl-clipboard` e `wtype` (Wayland) ou `xclip`/`xsel` (X11). Em Wayland, configure um atalho no compositor para encaminhar os comandos de gravação. Sem ferramenta de clipboard o envio `colar` cai no modo `digitar`.
 
 ## Instalação
 
@@ -88,6 +90,27 @@ Na primeira execução o modelo `large-v3` é baixado pelo faster-whisper e depo
 - **Biblioteca** — aba onde você cadastra as palavras que o whisper escreve errado. Em "sai assim" liste as variantes separadas por vírgula (`grock, groque, nine houter`), em "deve virar" o termo certo (`Grok`), e clique em Adicionar. A troca é aplicada em toda transcrição antes de ela aparecer na tela, ser colada/digitada e ir para o histórico — sem diferença de maiúscula, tolerando espaçamento diferente em termos de duas palavras, e só em palavra inteira (`grok` não mexe em `grokking`). O ✕ remove a entrada; tudo vale na hora, sem reiniciar.
 - **Estatísticas** — aba com os números do seu ditado, todos derivados do `history/history.jsonl` (não há contador paralelo): total de palavras, palavras por minuto (palavras ÷ tempo de fala, com o melhor ditado à parte), sequência de dias seguidos e recorde, tempo falado e média por ditado, quanto tempo o mesmo texto levaria digitado a 40 ppm, correções aplicadas pela Biblioteca, mapa de atividade das últimas 26 semanas, distribuição por hora do dia e as palavras que você mais fala (boas candidatas à Biblioteca). Ditados antigos entram na conta — a duração é medida pelo tamanho do WAV; só a contagem de correções começa nesta versão. A janela se alarga sozinha ao abrir a aba (limitada à área útil do monitor) e volta ao tamanho anterior ao sair: nada de número escondido atrás de barra de rolagem.
 
+## Desempenho e diagnóstico no Linux
+
+O comando `sussurro toggle` usa um cliente leve de socket, sem importar Tk, áudio ou CUDA. A interface consulta os comandos a cada 20 ms. No Linux, o microfone abre primeiro na taxa nativa do dispositivo, com blocos de 20 ms; os blocos que ainda estão no mixer são enviados antes de encerrar o ditado.
+
+A cópia via `wl-copy`/`xclip` não captura os pipes dos processos que ficam servindo o clipboard. Capturá-los provocava um timeout de 2 segundos e acionava a digitação de reserva. A restauração do clipboard aguarda 400 ms em segundo plano, respeita cópias feitas pelo usuário durante essa espera e mantém a ordem entre colagens consecutivas.
+
+O modelo continua sendo `large-v3`, CUDA, `float16`, `beam_size=5`. O aquecimento consome o gerador de transcrição e inicializa o VAD antes de liberar a gravação. No modo `final`, os blocos são concatenados uma única vez e o VAD é executado pelo faster-whisper, evitando uma segunda varredura do mesmo áudio.
+
+- `sussurro status`: informa se o modelo está pronto, se está gravando e se ainda há trabalho pendente.
+- `sussurro-performance.log`: registra duração do áudio, tempo de transcrição, tempo de entrega e tempo desde o comando de parada. Não contém áudio nem texto ditado. Rotação de 1 MB, com duas cópias anteriores.
+- Testes de regressão: `.venv/bin/python -m unittest discover -s tests -v`.
+
+Os exemplos com `sussurro` pressupõem um launcher local com esse nome; ele não é instalado automaticamente. Com o ambiente virtual ativado, também é possível chamar os comandos diretamente no diretório do projeto:
+
+```bash
+python app.py toggle
+python app.py status
+```
+
+Em Wayland, a injeção usa `wtype`; configure o atalho do compositor para executar o Python do ambiente virtual e o `app.py` usando caminhos absolutos, com o argumento `toggle` (ou `start`/`stop`).
+
 ## O que fica só na sua máquina
 
 - `history/` — gravações WAV e transcrições das suas sessões (indexadas em `history.jsonl`). É conteúdo seu e privado; não versionamos.
@@ -100,7 +123,7 @@ Todos estão no `.gitignore`. Nada é enviado para serviço externo: captura, VA
 ## Linux — o que ainda é limitado
 
 - Sem GPU NVIDIA o modelo não sobe (igual ao Windows).
-- Wayland: atalho global de mouse e injeção de teclado do pynput costumam falhar; X11 é o alvo.
+- Wayland: pynput não fornece o atalho global; use o cliente de socket com um atalho do compositor e instale `wtype` para enviar teclas.
 - Overlay da barra: sem chroma-key (`-transparentcolor` é Windows); cantos da janela ficam opacos.
 - Área útil do monitor: a tela Tk inteira, sem recorte por painel/multi-monitor.
 - Clique do atalho não é comido pelo sistema.

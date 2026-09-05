@@ -11,3 +11,4 @@ library.json
 
 # logs
 *.log
+sussurro-performance.log.*

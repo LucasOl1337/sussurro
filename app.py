@@ -7,16 +7,25 @@ modo de transcricao (simultaneo por trecho ou tudo ao final).
 Windows e Linux (X11/Pulse ou PipeWire). CUDA continua obrigatorio.
 """
 
+import sys
+from sussurro_ipc import IPC_SOCK, cli as _cli, ipc_send
+
+# O atalho sai ANTES de carregar interface, audio e bibliotecas CUDA.
+if __name__ == "__main__" and _cli(sys.argv):
+    raise SystemExit(0)
+
 import collections
 import ctypes
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
-import sys
 import threading
 import time
 import tkinter as tk
@@ -100,7 +109,8 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 from pynput import keyboard, mouse
 
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 1600  # 100 ms por callback do mic
+BLOCK_SIZE = 1600 if IS_WIN else 320  # Linux: 20 ms; Windows: 100 ms
+UI_POLL_MS = 20
 LEVEL_HZ = 40      # barras de onda por segundo alimentadas pelo mixer
 _CANCEL = object()  # sentinela: joga fora o que estava em voo
 
@@ -164,6 +174,27 @@ def LIB_FUZZY_DIST(chave: str) -> int:
 
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 LIBRARY_PATH = Path(__file__).with_name("library.json")
+# Medidas locais, sem audio nem texto ditado, com rotacao de arquivos.
+_perf_log = logging.getLogger("sussurro.performance")
+_perf_log.setLevel(logging.INFO)
+_perf_log.propagate = False
+if not _perf_log.handlers:
+    _handler = RotatingFileHandler(
+        Path(__file__).with_name("sussurro-performance.log"),
+        maxBytes=1_000_000, backupCount=2, encoding="utf-8",
+    )
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    _perf_log.addHandler(_handler)
+
+
+def _perf(event: str, **fields):
+    _perf_log.info(json.dumps({"event": event, **fields}, ensure_ascii=False))
+
+
+def _is_wayland() -> bool:
+    return (not IS_WIN) and bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
 HISTORY_DIR = Path(__file__).with_name("history")
 HISTORY_INDEX = HISTORY_DIR / "history.jsonl"
 HIST_RENDER_MAX = 200  # linhas desenhadas na aba HISTORICO (a memoria guarda tudo)
@@ -327,7 +358,7 @@ def backup_clipboard():
             return None
         try:
             r = subprocess.run(_CLIP_READ, capture_output=True, timeout=1, check=False)
-            return r.stdout
+            return r.stdout if r.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             return None
     if not _open_clipboard():
@@ -362,7 +393,8 @@ def restore_clipboard(data) -> None:
             return
         blob = data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
         try:
-            subprocess.run(_CLIP_WRITE, input=blob, timeout=2, check=False, capture_output=True)
+            subprocess.run(_CLIP_WRITE, input=blob, timeout=2, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired):
             pass
         return
@@ -386,8 +418,11 @@ def set_clipboard_text(text: str) -> bool:
         if not _CLIP_WRITE:
             return False
         try:
+            # wl-copy/xclip deixam um filho servindo o clipboard. Capturar stdout/stderr
+            # espera EOF desses filhos e causa timeout mesmo quando a copia funcionou.
             subprocess.run(
-                _CLIP_WRITE, input=text.encode("utf-8"), timeout=2, check=True, capture_output=True,
+                _CLIP_WRITE, input=text.encode("utf-8"), timeout=2, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return True
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -741,6 +776,7 @@ class Transcriber:
         self._segment_queue: queue.Queue = queue.Queue()
         self._session_parts: list = []
         self._session_started = None
+        self._stop_requested_at = None
         self._streams: list = []
         self._resamplers: list = []   # um resampler por stream (taxa nativa != 16 kHz)
         self._slot = 0                # indice do stream sendo aberto em start()
@@ -753,10 +789,13 @@ class Transcriber:
         self._session_id = 0          # cancelar/reiniciar invalida o que ficou em voo
         self._pending = 0             # trechos aceitos e ainda nao entregues
         self._pending_lock = threading.Lock()
-        self._drained = True          # o segmentador ja soltou tudo que tinha da sessao
+        self._drained = True          # todos os trechos foram entregues e arquivados
         # nivel RMS recente do audio ja misturado; a barra de overlay le daqui
         self.levels: collections.deque = collections.deque(maxlen=96)
         self._keyboard = keyboard.Controller()
+        self._clipboard_lock = threading.RLock()
+        self._clipboard_restore = None
+        self._clipboard_timer = None
         threading.Thread(target=self._segmenter_loop, daemon=True).start()
         threading.Thread(target=self._transcribe_loop, daemon=True).start()
         threading.Thread(target=self._mixer_loop, daemon=True).start()
@@ -765,9 +804,15 @@ class Transcriber:
     def load_model(self):
         self.status_queue.put("Carregando large-v3 na GPU...")
         t0 = time.perf_counter()
-        self.model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-        # aquecimento: primeira inferencia compila kernels e distorce a latencia
-        self.model.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), language="pt")
+        model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+        silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        segments, _ = model.transcribe(silence, language="pt", beam_size=5)
+        # faster-whisper so executa a inferencia quando o gerador e consumido.
+        collections.deque(segments, maxlen=0)
+        get_speech_timestamps(silence, VAD_OPTIONS)
+        self.model = model  # atalho so liberado depois de aquecer Whisper e VAD
+        _perf("model_ready", device=model.model.device, compute_type=model.model.compute_type,
+              model="large-v3", load_s=round(time.perf_counter() - t0, 3))
         self.status_queue.put(f"Modelo pronto ({time.perf_counter() - t0:.1f}s). Pode gravar.")
 
     # -- captura ------------------------------------------------------------
@@ -783,31 +828,31 @@ class Transcriber:
             res = self._resamplers[slot]
             data = res.process(mono) if res else mono.copy()
             with self._mix_lock:
-                self._mix_buffers[slot].append(data)
+                if self.recording.is_set():
+                    self._mix_buffers[slot].append(data)
 
         return cb
 
     def _mixer_loop(self):
-        """Junta os buffers dos streams (min len, soma, clip) e alimenta o VAD."""
         while True:
             time.sleep(0.01)
             with self._mix_lock:
-                if not self._mix_buffers or any(not b for b in self._mix_buffers):
-                    continue
-                # descarta cabecas vazias
-                for i, buf in enumerate(self._mix_buffers):
-                    while buf and buf[0].size == 0:
-                        buf.pop(0)
-                if any(not b for b in self._mix_buffers):
-                    continue
-                n = min(b[0].size for b in self._mix_buffers)
-                if n <= 0:
-                    continue
-                mixed = np.zeros(n, dtype=np.float32)
-                for i, buf in enumerate(self._mix_buffers):
-                    mixed += buf[0][:n]
-                    rest = buf[0][n:]
-                    self._mix_buffers[i] = ([rest] if rest.size else []) + buf[1:]
+                self._drain_mix_locked()
+
+    def _drain_mix_locked(self, flush: bool = False):
+        """Enfileira sob o lock: nenhum bloco ultrapassa o marcador de stop."""
+        while self._mix_buffers:
+            for buf in self._mix_buffers:
+                while buf and not buf[0].size:
+                    buf.pop(0)
+            active = [buf for buf in self._mix_buffers if buf]
+            if not active or (not flush and len(active) != len(self._mix_buffers)):
+                return
+            n = min(buf[0].size for buf in active)
+            mixed = np.zeros(n, dtype=np.float32)
+            for buf in active:
+                mixed += buf[0][:n]
+                buf[0] = buf[0][n:]
             np.clip(mixed, -1.0, 1.0, out=mixed)
             self._push_levels(mixed)
             self._audio_queue.put(mixed)
@@ -843,7 +888,8 @@ class Transcriber:
                     data = res.process(mono)
                     if data.size:
                         with self._mix_lock:
-                            self._mix_buffers[slot].append(data)
+                            if self.recording.is_set():
+                                self._mix_buffers[slot].append(data)
         except Exception as e:
             self.status_queue.put(f"ERRO ({label}): {e}")
 
@@ -866,35 +912,44 @@ class Transcriber:
             ).start()
             self._streams.append(handle)
             return
-        try:
-            stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                blocksize=BLOCK_SIZE, device=device_index,
-                callback=self._make_callback(label, self._slot),
-            )
-            stream.start()
-            self._resamplers.append(None)
-        except sd.PortAudioError:
-            query = device_index if device_index is not None else sd.default.device[0]
-            native = int(sd.query_devices(query)["default_samplerate"])
-            self._resamplers.append(StreamResampler(native))
-            stream = sd.InputStream(
-                samplerate=native, channels=1, dtype="float32",
-                blocksize=int(native * 0.1), device=device_index,
-                callback=self._make_callback(label, self._slot),
-            )
-            stream.start()
-        self._streams.append(stream)
+        query = device_index if device_index is not None else sd.default.device[0]
+        native = int(sd.query_devices(query)["default_samplerate"])
+        # ALSA/USB costuma recusar 16 kHz. Abrir a taxa nativa evita uma tentativa
+        # com erro em cada clique (o FIFINE desta maquina captura a 48 kHz).
+        rates = dict.fromkeys((SAMPLE_RATE, native) if IS_WIN else (native, SAMPLE_RATE))
+        for rate in rates:
+            stream = None
+            self._resamplers.append(StreamResampler(rate) if rate != SAMPLE_RATE else None)
+            try:
+                stream = sd.InputStream(
+                    samplerate=rate, channels=1, dtype="float32",
+                    blocksize=round(rate * BLOCK_SIZE / SAMPLE_RATE), device=device_index,
+                    latency=None if IS_WIN else "low",
+                    callback=self._make_callback(label, self._slot),
+                )
+                stream.start()
+            except sd.PortAudioError:
+                if stream is not None:
+                    stream.close()
+                self._resamplers.pop()
+                if rate == list(rates)[-1]:
+                    raise
+            else:
+                self._streams.append(stream)
+                return
 
     def start(self, device_index: int | None, inject: bool,
               capture_mode: str = "microfone", loopback_index: int | None = None):
         if self.recording.is_set():
             return
+        if self.busy():
+            raise RuntimeError("Aguarde o ditado anterior terminar.")
         self._session_inject = inject
         self._session_mode = self.transcribe_mode
         self._session_had_speech = False
         self._session_emitted = False
         self._session_started = datetime.now()
+        self._stop_requested_at = None
         self._session_id += 1
         self._session_parts = []
         self.levels.clear()
@@ -925,11 +980,14 @@ class Transcriber:
     def stop(self):
         if not self.recording.is_set():
             return
-        self.recording.clear()
+        self._stop_requested_at = time.perf_counter()
         # status ANTES do sentinela: o segmentador emite os status finais depois dele,
         # e a ordem na fila e o que impede "Transcrevendo..." de ficar pendurado
         self.status_queue.put("Parado. Transcrevendo...")
-        self._audio_queue.put(None)  # sentinela: descarrega o buffer restante
+        with self._mix_lock:
+            self.recording.clear()
+            self._drain_mix_locked(flush=True)
+            self._audio_queue.put(None)  # depois do ultimo bloco, inclusive os do mixer
         streams, self._streams = self._streams, []
         for s in streams:
             s.stop()
@@ -983,16 +1041,25 @@ class Transcriber:
     # -- segmentacao --------------------------------------------------------
     def _segmenter_loop(self):
         buffer = np.zeros(0, dtype=np.float32)
+        final_blocks = []
         last_check = 0.0
         while True:
             item = self._audio_queue.get()
             try:
                 if item is _CANCEL:  # sessao cancelada: o buffer acumulado morre aqui
                     buffer = np.zeros(0, dtype=np.float32)
+                    final_blocks.clear()
                     continue
                 if item is None:  # fim da gravacao: manda o que sobrou
-                    speech = (get_speech_timestamps(buffer, VAD_OPTIONS)
-                              if buffer.size > SAMPLE_RATE // 4 else [])
+                    if self._session_mode == "final":
+                        buffer = (np.concatenate(final_blocks) if final_blocks
+                                  else np.zeros(0, dtype=np.float32))
+                        final_blocks.clear()
+                        # O Whisper ja aplica VAD neste modo; nao varrer o audio duas vezes.
+                        speech = [{"start": 0}] if buffer.size > SAMPLE_RATE // 4 else []
+                    else:
+                        speech = (get_speech_timestamps(buffer, VAD_OPTIONS)
+                                  if buffer.size > SAMPLE_RATE // 4 else [])
                     if speech:
                         lead_s = speech[0]["start"] / SAMPLE_RATE
                         self._enqueue_segment(buffer, lead_s)
@@ -1000,14 +1067,14 @@ class Transcriber:
                         self.status_queue.put("Parado (sem fala detectada).")
                     else:
                         self.status_queue.put("Parado.")
-                    self._drained = True  # nao vem mais trecho desta sessao
                     # marcador de fim de sessao (carimbado: cancelamento o invalida)
                     self._segment_queue.put((None, None, None, self._session_id, 0.0))
                     buffer = np.zeros(0, dtype=np.float32)
                     continue
-                buffer = np.concatenate([buffer, item])
                 if self._session_mode == "final":
+                    final_blocks.append(item)
                     continue  # acumula tudo; transcreve de uma vez no stop
+                buffer = np.concatenate([buffer, item])
                 now = time.monotonic()
                 if now - last_check < VAD_CHECK_EVERY_S:
                     continue
@@ -1031,6 +1098,7 @@ class Transcriber:
                 traceback.print_exc()
                 self.status_queue.put(f"ERRO na segmentacao: {e}")
                 buffer = np.zeros(0, dtype=np.float32)
+                final_blocks.clear()
 
     def _enqueue_segment(self, audio: np.ndarray, lead_s: float = 0.0):
         self._session_had_speech = True
@@ -1049,7 +1117,11 @@ class Transcriber:
                 if sid != self._session_id:
                     continue  # sessao cancelada ou substituida: descarta sem colar nada
                 if audio is None:  # fim de sessao: grava no historico
-                    self._finalize_session()
+                    try:
+                        self._finalize_session()
+                    finally:
+                        if sid == self._session_id:
+                            self._drained = True
                     continue
                 t0 = time.perf_counter()
                 lang = None if self.language == "auto" else self.language
@@ -1073,23 +1145,24 @@ class Transcriber:
                         payload = text
                     self.text_queue.put(payload)
                     self._session_emitted = True
-                # baixa aqui, antes de colar e de arquivar: o texto ja saiu, a barra nao
-                # tem mais o que mostrar — colar ainda leva ~0,45 s so restaurando o
-                # clipboard, e segurar a barra ate la e o que parecia travamento
-                self._pending_done()
-                deve_baixar = False
                 if text and inject:
                     if self.inject_method == "colar":
                         self._paste(payload)
                     else:
-                        self._keyboard.type(payload)
+                        self._type_fallback(payload)
+                _perf("segment_done", session=sid, audio_s=round(audio.size / SAMPLE_RATE, 3),
+                      inference_ms=round(dt * 1000, 1),
+                      delivery_ms=round((time.perf_counter() - t0 - dt) * 1000, 1),
+                      stop_to_delivery_ms=(round((time.perf_counter() - self._stop_requested_at) * 1000, 1)
+                                           if self._stop_requested_at is not None else None),
+                      injected=bool(text and inject))
                 state = "Gravando — pode falar." if self.recording.is_set() else "Parado."
                 self.status_queue.put(f"{state}  (trecho de {audio.size / SAMPLE_RATE:.1f}s em {dt:.1f}s)")
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
                 self.status_queue.put(f"ERRO na transcricao: {e}")
             finally:
-                if deve_baixar:
+                if deve_baixar and sid == self._session_id:
                     self._pending_done()
 
     def _finalize_session(self):
@@ -1116,16 +1189,78 @@ class Transcriber:
 
     def _paste(self, text: str):
         """Cola via Ctrl+V preservando o clipboard original (imagens, arquivos etc.)."""
+        if not IS_WIN:
+            return self._paste_linux(text)
         backup = backup_clipboard()
         if not set_clipboard_text(text):
-            self._keyboard.type(text)  # clipboard ocupado por outro app: cai pro digitar
+            self._type_fallback(text)
             return
         time.sleep(0.05)
+        if self._send_paste_key():
+            time.sleep(0.4)
+            restore_clipboard(backup)
+            return
         with self._keyboard.pressed(keyboard.Key.ctrl):
             self._keyboard.press("v")
             self._keyboard.release("v")
         time.sleep(0.4)  # o app alvo precisa ler o clipboard antes da restauracao
         restore_clipboard(backup)
+
+    def _restore_linux_clipboard(self, pending):
+        with self._clipboard_lock:
+            if self._clipboard_restore is not pending:
+                return  # timer antigo: outra colagem ja tomou seu lugar
+            backup, pasted, _deadline = pending
+            if backup_clipboard() == pasted:
+                restore_clipboard(backup)  # respeita algo que o usuario copiou depois
+            self._clipboard_restore = None
+
+    def _paste_linux(self, text: str):
+        with self._clipboard_lock:
+            if self._clipboard_restore is not None:
+                self._clipboard_timer.cancel()
+                # Duas colagens proximas ainda respeitam o tempo de leitura da primeira.
+                time.sleep(max(0, self._clipboard_restore[2] - time.monotonic()))
+                self._restore_linux_clipboard(self._clipboard_restore)
+            backup = backup_clipboard()
+            if not set_clipboard_text(text):
+                self._type_fallback(text)
+                return
+            time.sleep(0.05)
+            if not self._send_paste_key():
+                with self._keyboard.pressed(keyboard.Key.ctrl):
+                    self._keyboard.press("v")
+                    self._keyboard.release("v")
+            # A espera de 400 ms protege a leitura do clipboard pelo destino,
+            # mas nao precisa bloquear a proxima inferencia ou manter o HUD ocupado.
+            pending = (backup, text.encode("utf-8"), time.monotonic() + 0.4)
+            self._clipboard_restore = pending
+            timer = threading.Timer(0.4, self._restore_linux_clipboard, args=(pending,))
+            timer.daemon = True
+            self._clipboard_timer = timer
+            timer.start()
+
+    def _send_paste_key(self) -> bool:
+        """No Wayland o pynput nao injeta tecla no app focado; wtype sim."""
+        if not _is_wayland() or not shutil.which("wtype"):
+            return False
+        try:
+            r = subprocess.run(
+                ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
+                timeout=2, check=False, capture_output=True,
+            )
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def _type_fallback(self, text: str):
+        if _is_wayland() and shutil.which("wtype"):
+            try:
+                subprocess.run(["wtype", "--", text], timeout=8, check=False, capture_output=True)
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self._keyboard.type(text)
 
 
 class RecorderBar:
@@ -1417,6 +1552,65 @@ def _mouse_button_id(button) -> str | None:
     return None
 
 
+class IpcServer(threading.Thread):
+    """Unix socket: Hyprland (e `sussurro toggle`) ligam/desligam gravacao sem foco na janela."""
+
+    daemon = True
+
+    def __init__(self, event_queue: queue.Queue, path: Path, transcriber=None):
+        super().__init__(name="sussurro-ipc")
+        self.event_queue = event_queue
+        self.transcriber = transcriber
+        self.path = path
+        self._sock = None
+        self._stop = threading.Event()
+
+    def run(self):
+        try:
+            if self.path.exists():
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.bind(str(self.path))
+            os.chmod(self.path, 0o600)
+            self._sock.listen(4)
+            self._sock.settimeout(0.5)
+            while not self._stop.is_set():
+                try:
+                    conn, _ = self._sock.accept()
+                except socket.timeout:
+                    continue
+                with conn:
+                    conn.settimeout(1)
+                    raw = conn.recv(64).decode("utf-8", "replace").strip().lower()
+                    conn.sendall(self._handle(raw).encode("utf-8"))
+        except Exception:
+            traceback.print_exc()
+        finally:
+            try:
+                if self._sock is not None:
+                    self._sock.close()
+                if self.path.exists():
+                    self.path.unlink()
+            except OSError:
+                pass
+
+    def _handle(self, data: str) -> str:
+        if data in ("toggle", "start", "stop"):
+            self.event_queue.put((data, None))
+            return "ok\n"
+        if data == "status":
+            if self.transcriber is None:
+                return "ok\n"
+            t = self.transcriber
+            return json.dumps({"ready": t.model is not None,
+                               "recording": t.recording.is_set(), "busy": t.busy(),
+                               "model": "large-v3", "device": "cuda", "compute_type": "float16"}) + "\n"
+        return "err unknown\n"
+
+
 class MouseHotkey:
     """Hook global de mouse. No Windows o botao e suprimido; no Linux o clique tambem chega ao app debaixo.
 
@@ -1430,6 +1624,11 @@ class MouseHotkey:
         self.trigger_mode = trigger_mode
         self.capturing = False
         self.active = False  # sessao de gravacao iniciada pelo atalho
+        self._listener = None
+        # Wayland: pynput nao ve clique global se a janela nao tem foco (e pode
+        # SIGSEGV). O Hyprland manda toggle/start/stop pelo socket.
+        if _is_wayland():
+            return
         try:
             if IS_WIN:
                 self._listener = mouse.Listener(win32_event_filter=self._filter)
@@ -1948,6 +2147,8 @@ class App:
         self.hotkey = MouseHotkey(
             self.hotkey_queue, self.settings["mouse_button"], self.settings["trigger_mode"]
         )
+        self._ipc = IpcServer(self.hotkey_queue, IPC_SOCK, self.transcriber)
+        self._ipc.start()
 
         self.FONT_UI = pick_font(
             ["Segoe UI", "Noto Sans", "DejaVu Sans", "Ubuntu", "Liberation Sans"],
@@ -2113,8 +2314,12 @@ class App:
                                get_levels=lambda: self.transcriber.levels,
                                on_cancel=self._cancel, on_confirm=self._stop)
 
+        # Tk 9 no Linux SIGSEGV se um widget for tocado fora da thread do mainloop
+        # (CTkButton.configure desenha via canvas create_text -> TkpGetColor).
+        # No Windows isso "funcionava"; aqui tudo que mexe na HUD passa por esta fila.
+        self._ui_queue: queue.Queue = queue.Queue()
         threading.Thread(target=self._load_model, daemon=True).start()
-        root.after(100, self._poll)
+        root.after(UI_POLL_MS, self._poll)
 
     # -- abas / historico ----------------------------------------------------
     def _show_tab(self, name: str):
@@ -2495,14 +2700,25 @@ class App:
         self.text.delete("1.0", "end")
 
     # -- loop de UI ---------------------------------------------------------
+    def _ui(self, fn, *args, **kwargs):
+        """Agenda chamada de widget para a thread do Tk. Nao usar Tk daqui de outra thread."""
+        self._ui_queue.put((fn, args, kwargs))
+
     def _load_model(self):
         try:
             self.transcriber.load_model()
-            self.record_btn.configure(state="normal")
+            self._ui(self.record_btn.configure, state="normal")
         except Exception as e:
+            traceback.print_exc()
             self.status_queue.put(f"ERRO ao carregar modelo: {e}")
 
     def _poll(self):
+        try:
+            while True:
+                fn, args, kwargs = self._ui_queue.get_nowait()
+                fn(*args, **kwargs)
+        except queue.Empty:
+            pass
         # primeiro de tudo: a barra so fica enquanto ha trabalho. Esperar o status certo
         # a punha pra sair depois de colar e de redesenhar o historico — e e isso que o
         # olho le como travamento.
@@ -2523,6 +2739,11 @@ class App:
                         self.hotkey.active = False  # falhou: nao deixa o estado do atalho preso
                 elif event == "stop":
                     self._stop()
+                elif event == "toggle":
+                    if self.transcriber.recording.is_set():
+                        self._stop()
+                    elif not self._start(inject=True):
+                        self.hotkey.active = False
         except queue.Empty:
             pass
         try:
@@ -2546,7 +2767,7 @@ class App:
                     self.bar.hide()
         except queue.Empty:
             pass
-        self.root.after(100, self._poll)
+        self.root.after(UI_POLL_MS, self._poll)
 
 
 if __name__ == "__main__":
@@ -2555,6 +2776,8 @@ if __name__ == "__main__":
         # generico e mostra o icone do Python em vez do sussurro.ico da janela
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Lucas.Sussurro")
     ctk.set_appearance_mode("dark")
-    root = ctk.CTk()
+    # className no Linux casa com StartupWMClass=Sussurro do .desktop (no Windows o
+    # AppUserModelID ja cuida do agrupamento na taskbar).
+    root = ctk.CTk() if IS_WIN else ctk.CTk(className="Sussurro")
     App(root)
     root.mainloop()
