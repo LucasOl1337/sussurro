@@ -2,7 +2,9 @@
 
 As mudanças de cada versão do Sussurro são registradas aqui. As versões seguem o formato `MAJOR.MINOR.PATCH`.
 
-## [Não lançado]
+## [0.3.0] — 2026-09-05
+
+Gestos do headset, barra que segue o monitor, site com vídeo e fontes com Xft no Linux.
 
 ### Adicionado
 
