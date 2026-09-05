@@ -50,6 +50,10 @@ python3.11 -m venv .venv
 
 As bibliotecas de CUDA (`cublas`, `cudnn`) vêm dos wheels da NVIDIA listados no `requirements.txt` (`nvidia-cublas-cu12` / `nvidia-cudnn-cu12`). No Windows o `app.py` registra `site-packages\nvidia\*\bin` via `os.add_dll_directory()` e prefixa o `PATH`. No Linux pré-carrega os `.so` em `nvidia/*/lib` (e `lib64`) — sem isso a transcrição falha com DLL/`.so` de cublas ausente. Se você instalar as dependências fora de um venv na raiz do projeto, garanta que esses pacotes estejam visíveis no ambiente usado para rodar.
 
+## Omarchy / Hyprland
+
+No Omarchy a barra de gravação segue o monitor do cursor e ganha cantos recortados pelo compositor, e a aba **OMARCHY** aciona o ditado pelo headset MCHOSE X9 sem tocar no PC (roda de volume invertida rápido ou toque duplo no mute, com Enter automático ao terminar). Regras de janela, regra udev e instruções em [`contrib/omarchy/`](contrib/omarchy/README.md).
+
 ## Como rodar
 
 Windows:

@@ -6,7 +6,14 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ### Adicionado
 
-- Comandos `toggle-enter`, `start-enter` e `stop-enter` por socket local: a sessão termina apertando Enter depois da última colagem, confirmando o envio da frase. Usados pelo daemon `x9-sussurro`, que aciona o ditado pelo headset MCHOSE X9 (inversão rápida da roda de volume), para ditar longe do PC. O daemon, a unit systemd, a regra udev e o passo a passo estão em `contrib/mchose-x9/`.
+- Aba **OMARCHY** (Linux): gestos do headset MCHOSE X9 acionam o ditado sem tocar no PC — roda de volume invertida rápido ou toque duplo no mute (detectado pelo silêncio digital do mic). Liga/desliga, Enter automático, ajuste dos tempos, mic reserva, instalação da regra udev e feed de eventos, tudo na aba. Módulo `sussurro_devices.py`, pronto para outros perfis de fone.
+- Comandos `toggle-enter`, `start-enter` e `stop-enter` por socket local: a sessão termina apertando Enter depois da última colagem, confirmando o envio da frase.
+- `contrib/omarchy/`: regras de janela do Hyprland (`sussurro.lua`), regra udev do fone e passo a passo.
+
+### Corrigido
+
+- Barra de gravação no Hyprland: aparece no monitor onde o cursor está (antes ficava sempre no monitor do meio, porque o Tk em XWayland vê uma tela única e o ponteiro dele congela fora de janelas X). Agora pergunta ao socket do Hyprland. Módulo `sussurro_hypr.py`.
+- Barra de gravação sem o retângulo escuro atrás da cápsula: no Hyprland ela vira uma janela gerenciada (classe `SussurroBar`) e a regra `rounding` recorta os cantos.
 
 ## [0.2.0] — 2026-09-05
 

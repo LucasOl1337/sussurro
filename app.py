@@ -9,6 +9,8 @@ Windows e Linux (X11/Pulse ou PipeWire). CUDA continua obrigatorio.
 
 import sys
 from sussurro_ipc import IPC_SOCK, cli as _cli, ipc_send
+from sussurro_hypr import Hypr
+import sussurro_devices as devmod
 
 # O atalho sai ANTES de carregar interface, audio e bibliotecas CUDA.
 if __name__ == "__main__" and _cli(sys.argv):
@@ -208,6 +210,7 @@ DEFAULT_SETTINGS = {
     "language": "pt",
     "inject_method": "colar",   # colar (Ctrl+V, clipboard preservado) | digitar
     "dot_pos": [0.5, 0.94],     # posicao da bolinha, fracao da area util do monitor
+    "devices": dict(devmod.DEFAULTS),  # gestos de dispositivos (aba OMARCHY, so Linux)
 }
 
 # Mensagens do hook de mouse do Windows (win32_event_filter do pynput)
@@ -224,6 +227,7 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     if SETTINGS_PATH.exists():
         settings.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+    settings["devices"] = {**devmod.DEFAULTS, **(settings.get("devices") or {})}
     return settings
 
 
@@ -317,8 +321,24 @@ else:
         _CLIP_WRITE = ["xsel", "--clipboard", "--input"]
 
 
+_HYPR = None
+
+
+def _hypr() -> Hypr:
+    """Cliente do socket do Hyprland (Omarchy); `available` e False fora dele."""
+    global _HYPR
+    if _HYPR is None:
+        _HYPR = Hypr()
+    return _HYPR
+
+
 def monitor_work_area(x: int, y: int):
-    """Area util do monitor que contem o ponto (x, y). No Linux: tela Tk inteira."""
+    """Area util do monitor que contem o ponto (x, y).
+
+    Windows: MonitorFromPoint. Hyprland: socket (o Tk em XWayland so ve a uniao
+    dos monitores, e por isso a barra caia sempre no monitor do meio). Outro X11:
+    tela Tk inteira.
+    """
     if IS_WIN:
         hmon = _u32.MonitorFromPoint(wintypes.POINT(x, y), 2)  # MONITOR_DEFAULTTONEAREST
         mi = MONITORINFO()
@@ -326,6 +346,11 @@ def monitor_work_area(x: int, y: int):
         _u32.GetMonitorInfoW(hmon, ctypes.byref(mi))
         r = mi.rcWork
         return r.left, r.top, r.right, r.bottom
+    h = _hypr()
+    if h.available:
+        area = h.work_area_at(x, y)
+        if area:
+            return area
     root = tk._default_root
     if root is None:
         raise RuntimeError("monitor_work_area precisa da janela Tk")
@@ -337,6 +362,11 @@ def cursor_pos():
         pt = wintypes.POINT()
         _u32.GetCursorPos(ctypes.byref(pt))
         return pt.x, pt.y
+    h = _hypr()
+    if h.available:  # o ponteiro do XWayland congela fora de janelas X
+        pos = h.cursorpos()
+        if pos:
+            return pos
     root = tk._default_root
     if root is None:
         raise RuntimeError("cursor_pos precisa da janela Tk")
@@ -1333,17 +1363,25 @@ class RecorderBar:
         self.WX0 = self.LX + self.BTN / 2 + 7        # area da onda
         self.WX1 = self.RX - self.BTN / 2 - 7
 
-        self.win = tk.Toplevel(root)
-        self.win.overrideredirect(True)
+        # No Hyprland a barra e uma janela gerenciada (classe SussurroBar): a regra em
+        # contrib/omarchy/sussurro.lua a deixa flutuante, fixa, sem foco e com rounding,
+        # que recorta os cantos — o Tk nao tem transparencia por pixel no X11.
+        self.hypr = (not IS_WIN) and _hypr().available
+        self.win = tk.Toplevel(root, class_="SussurroBar")
+        self.win.title("Sussurro — barra")
+        if not self.hypr:
+            self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
         if IS_WIN:
             self.win.attributes("-transparentcolor", self.TRANSPARENT)
             canvas_bg = self.TRANSPARENT
         else:
-            try:
-                self.win.wm_attributes("-type", "dock")
-            except tk.TclError:
-                pass
+            if not self.hypr:
+                try:
+                    self.win.wm_attributes("-type", "dock")
+                except tk.TclError:
+                    pass
+            self.TRANSPARENT = self.PILL_BG  # fora da capsula fica a cor dela; o rounding corta
             canvas_bg = self.PILL_BG
         self.canvas = tk.Canvas(self.win, width=self.W, height=self.H,
                                 bg=canvas_bg, highlightthickness=0, cursor="fleur")
@@ -1368,6 +1406,7 @@ class RecorderBar:
         self._phase = 0.0
         self._photo = None
         self._ticking = False
+        self._follow_n = 0
 
     def _set_exstyle(self):
         GWL_EXSTYLE = -20
@@ -1424,7 +1463,9 @@ class RecorderBar:
             return
         self._phase += self.FPS_MS / 1000.0
         self._draw()
-        self._follow()
+        self._follow_n += 1
+        if self._follow_n % 4 == 0:  # ~180 ms: segue o cursor de monitor sem martelar o socket
+            self._follow()
         self.root.after(self.FPS_MS, self._tick)
 
     # -- mouse ---------------------------------------------------------------
@@ -2181,6 +2222,12 @@ class App:
         )
         self._ipc = IpcServer(self.hotkey_queue, IPC_SOCK, self.transcriber)
         self._ipc.start()
+        self.devcfg = self.settings["devices"]
+        self.gestures = None
+        if not IS_WIN:
+            self.gestures = devmod.DeviceGestures(self.devcfg, self._on_device_gesture)
+            if self.devcfg.get("enabled"):
+                self.gestures.start()
 
         self.FONT_UI = pick_font(
             ["Segoe UI", "Noto Sans", "DejaVu Sans", "Ubuntu", "Liberation Sans"],
@@ -2301,8 +2348,11 @@ class App:
         tabbar = ctk.CTkFrame(root, fg_color="transparent")
         tabbar.pack(fill="x", padx=18, pady=(0, 6))
         self.tab_btns = {}
-        for name, label in (("historico", "HISTORICO"), ("aovivo", "AO VIVO"),
-                            ("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATISTICAS")):
+        tabs = [("historico", "HISTORICO"), ("aovivo", "AO VIVO"),
+                ("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATISTICAS")]
+        if self.gestures is not None:
+            tabs.append(("omarchy", "OMARCHY"))
+        for name, label in tabs:
             btn = ctk.CTkButton(tabbar, text=label, width=118, height=30, corner_radius=8,
                                 fg_color="transparent", hover_color=SURFACE_2,
                                 text_color=INK_3, font=(self.FONT_DISPLAY, 14),
@@ -2335,6 +2385,8 @@ class App:
         self._geom_antes = None    # geometria de fora da aba ESTATISTICAS
         self._tabs = {"historico": self.hist_frame, "aovivo": self.text,
                       "biblioteca": self.lib_tab, "estatisticas": self.stats_frame}
+        if self.gestures is not None:
+            self._tabs["omarchy"] = self._build_devices_tab()
         self._tab = None
         self._show_tab("historico")
 
@@ -2378,6 +2430,8 @@ class App:
         self._tabs[name].pack(fill="both", expand=True, padx=6, pady=6)
         if name == "estatisticas":
             self._fit_stats_window()
+        if name == "omarchy":
+            self._devices_tick()
 
     @staticmethod
     def _load_history():
@@ -2618,6 +2672,179 @@ class App:
         self._render_library()
         self._stats_dirty = True
         self.status.configure(text=f"Biblioteca: \"{certo}\" removido.")
+
+    # -- aba OMARCHY: gestos de dispositivos (so Linux) ------------------------
+    def _build_devices_tab(self):
+        g = self.gestures
+        wrap = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        ctk.CTkLabel(wrap, text=f"GESTOS DO HEADSET · {g.profile.label.upper()}", text_color=INK,
+                     anchor="w", font=(self.FONT_DISPLAY, 16)).pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(wrap, text=("Aciona o Sussurro pelo fone, sem tocar no PC: gire a roda de volume "
+                                 "pra cima e pra baixo rapido, ou de um toque duplo no mute. "
+                                 "Ao terminar de colar, o Sussurro aperta Enter."),
+                     text_color=INK_3, anchor="w", justify="left", wraplength=620,
+                     font=(self.FONT_UI, 12)).pack(fill="x", padx=8, pady=(2, 8))
+
+        # status: fone / acesso / mic do fone / mic padrao
+        st = ctk.CTkFrame(wrap, fg_color=SURFACE_2, corner_radius=10)
+        st.pack(fill="x", padx=6, pady=(0, 8))
+        self.dev_status_labels = {}
+        for key, title in (("headset", "FONE"), ("access", "ACESSO AOS BOTOES"),
+                           ("mic", "MIC DO FONE"), ("default", "MIC PADRAO AGORA")):
+            col = ctk.CTkFrame(st, fg_color="transparent")
+            col.pack(side="left", expand=True, fill="x", padx=12, pady=10)
+            ctk.CTkLabel(col, text=title, text_color=INK_3, anchor="w", height=14,
+                         font=(self.FONT_UI, 10, "bold")).pack(fill="x")
+            lab = ctk.CTkLabel(col, text="—", text_color=INK, anchor="w", font=(self.FONT_UI, 12))
+            lab.pack(fill="x")
+            self.dev_status_labels[key] = lab
+        self.dev_udev_btn = ctk.CTkButton(
+            st, text="Instalar regra udev", command=self._dev_install_udev, width=150, height=30,
+            corner_radius=8, fg_color="transparent", hover_color=SURFACE_3, border_width=1,
+            border_color=BORDER_STRONG, text_color=INK_2, font=(self.FONT_UI, 12))
+
+        # liga/desliga
+        sw = ctk.CTkFrame(wrap, fg_color="transparent")
+        sw.pack(fill="x", padx=6, pady=(0, 4))
+        sw.grid_columnconfigure((0, 1), weight=1)
+        self.dev_switches = {}
+        self.dev_switch_labels = {
+            "enabled": "Gestos do fone ativos",
+            "auto_enter": "Enter automatico ao terminar",
+            "wheel_gesture": "Gesto: roda de volume invertida",
+            "mute_gesture": "Gesto: toque duplo no mute",
+            "mic_follow": "Mic padrao segue o fone",
+        }
+        for i, (key, label) in enumerate(self.dev_switch_labels.items()):
+            var = tk.BooleanVar(value=bool(self.devcfg.get(key)))
+            ctk.CTkSwitch(sw, text=label, variable=var, command=lambda k=key: self._on_dev_switch(k),
+                          progress_color=ACCENT, button_color=INK_2, button_hover_color=INK,
+                          text_color=INK, font=(self.FONT_UI, 12)).grid(
+                row=i // 2, column=i % 2, sticky="w", padx=8, pady=6)
+            self.dev_switches[key] = var
+
+        # parametros
+        pr = ctk.CTkFrame(wrap, fg_color="transparent")
+        pr.pack(fill="x", padx=6, pady=(4, 4))
+        pr.grid_columnconfigure(1, weight=1)
+        self.dev_param_labels = {}
+        self._dev_save_job = None
+
+        def slider(row, key, title, lo, hi, steps, fmt):
+            ctk.CTkLabel(pr, text=title, text_color=INK_3, anchor="w",
+                         font=(self.FONT_UI, 10, "bold")).grid(row=row, column=0, sticky="w",
+                                                                padx=(8, 10), pady=4)
+            sl = ctk.CTkSlider(pr, from_=lo, to=hi, number_of_steps=steps, progress_color=ACCENT,
+                               button_color=INK_2, button_hover_color=INK,
+                               command=lambda v, k=key, f=fmt: self._on_dev_param(k, v, f))
+            sl.set(float(self.devcfg.get(key)))
+            sl.grid(row=row, column=1, sticky="ew", pady=4)
+            lab = ctk.CTkLabel(pr, text=fmt(float(self.devcfg.get(key))), text_color=INK, width=64,
+                               anchor="e", font=(self.FONT_MONO, 11))
+            lab.grid(row=row, column=2, padx=(8, 8))
+            self.dev_param_labels[key] = lab
+
+        slider(0, "reversal_window", "JANELA DA INVERSAO DA RODA", 0.2, 1.0, 16, lambda v: f"{v:.2f} s")
+        slider(1, "tap_max", "TOQUE DUPLO NO MUTE · MAXIMO", 2.0, 10.0, 16, lambda v: f"{v:.1f} s")
+        slider(2, "idle_switch", "FONE PARADO ATE TROCAR O MIC", 3.0, 30.0, 27, lambda v: f"{v:.0f} s")
+
+        ctk.CTkLabel(pr, text="MIC RESERVA (QUANDO O FONE ESTA MUDO OU DESLIGADO)", text_color=INK_3,
+                     anchor="w", font=(self.FONT_UI, 10, "bold")).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 0))
+        self.dev_sources = devmod.list_sources()
+        self.dev_source_labels = ["automatico (primeiro que nao e o fone)"] + [
+            devmod.pretty_source(x) for x in self.dev_sources]
+        cur = self.devcfg.get("fallback_source")
+        current = (devmod.pretty_source(cur) if cur in self.dev_sources
+                   else self.dev_source_labels[0])
+        self.dev_fallback = ctk.CTkComboBox(
+            pr, values=self.dev_source_labels, command=self._on_dev_fallback, state="readonly",
+            height=30, corner_radius=8, fg_color=SURFACE_2, border_color=BORDER,
+            button_color=SURFACE_2, button_hover_color=SURFACE_3, dropdown_fg_color=SURFACE_2,
+            dropdown_hover_color=SURFACE_3, dropdown_text_color=INK, text_color=INK,
+            font=(self.FONT_UI, 12))
+        self.dev_fallback.set(current)
+        self.dev_fallback.grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=(4, 4))
+
+        # eventos
+        ctk.CTkLabel(wrap, text="EVENTOS", text_color=INK_3, anchor="w",
+                     font=(self.FONT_UI, 10, "bold")).pack(fill="x", padx=14, pady=(8, 0))
+        self.dev_feed = ctk.CTkTextbox(wrap, fg_color=SURFACE_2, text_color=INK_2,
+                                       font=(self.FONT_MONO, 11), height=150, corner_radius=10,
+                                       border_width=0)
+        self.dev_feed.pack(fill="x", padx=6, pady=(4, 8))
+        self.dev_feed.configure(state="disabled")
+        self._dev_feed_key = None
+        return wrap
+
+    def _devices_tick(self):
+        """Atualiza status e eventos a cada segundo enquanto a aba OMARCHY esta aberta."""
+        if self._tab != "omarchy" or self.gestures is None:
+            return
+        g = self.gestures
+        st = g.status()
+        lab = self.dev_status_labels
+        lab["headset"].configure(text="detectado" if st["headset"] else "nao encontrado",
+                                 text_color=INK if st["headset"] else ACCENT_TEXT)
+        if st["access"]:
+            lab["access"].configure(text="ok", text_color=INK)
+            self.dev_udev_btn.pack_forget()
+        else:
+            lab["access"].configure(text="sem regra udev" if not st["udev"] else "sem permissao",
+                                    text_color=ACCENT_TEXT)
+            if not self.dev_udev_btn.winfo_ismapped():
+                self.dev_udev_btn.pack(side="right", padx=12, pady=10)
+        lab["mic"].configure(text=st["mic_state"] if st["running"] else "gestos desligados")
+        lab["default"].configure(text=devmod.pretty_source(st["default"]))
+        key = (len(g.events), g.events[0] if g.events else None)
+        if key != self._dev_feed_key:
+            self._dev_feed_key = key
+            self.dev_feed.configure(state="normal")
+            self.dev_feed.delete("1.0", "end")
+            self.dev_feed.insert("end", "\n".join(f"{t}  {m}" for t, m in list(g.events)[:40])
+                                 or "Nenhum evento ainda. Gire a roda pra cima e pra baixo rapido.")
+            self.dev_feed.configure(state="disabled")
+        self.root.after(1000, self._devices_tick)
+
+    def _on_device_gesture(self, _why: str):
+        """Gesto do fone: liga/desliga o ditado; com Enter no fim se auto_enter estiver ligado."""
+        self.hotkey_queue.put(("toggle", {"enter": bool(self.devcfg.get("auto_enter", True))}))
+
+    def _on_dev_switch(self, key: str):
+        val = bool(self.dev_switches[key].get())
+        self.devcfg[key] = val
+        self._save()
+        if key == "enabled":
+            (self.gestures.start if val else self.gestures.stop)()
+        self.status.configure(
+            text=f"Omarchy: {self.dev_switch_labels[key]} — {'ligado' if val else 'desligado'}.")
+
+    def _on_dev_param(self, key: str, value, fmt):
+        self.devcfg[key] = round(float(value), 2)
+        self.dev_param_labels[key].configure(text=fmt(float(value)))
+        if self._dev_save_job is not None:  # o slider dispara dezenas de vezes por arraste
+            self.root.after_cancel(self._dev_save_job)
+        self._dev_save_job = self.root.after(400, self._save)
+
+    def _on_dev_fallback(self, label: str):
+        idx = self.dev_source_labels.index(label) if label in self.dev_source_labels else 0
+        self.devcfg["fallback_source"] = None if idx == 0 else self.dev_sources[idx - 1]
+        self._save()
+
+    def _dev_install_udev(self):
+        self.dev_udev_btn.configure(state="disabled", text="Instalando...")
+
+        def work():
+            ok, msg = devmod.install_udev_rule()
+            self._ui_queue.put((self._dev_install_done, (ok, msg), {}))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _dev_install_done(self, ok: bool, msg: str):
+        self.dev_udev_btn.configure(state="normal", text="Instalar regra udev")
+        self.status.configure(text=("Omarchy: " if ok else "ERRO udev: ") + msg)
+        if ok and self.gestures.running():
+            self.gestures.restart()
 
     # -- callbacks de configuracao ------------------------------------------
     def _save(self):
