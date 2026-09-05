@@ -1121,7 +1121,8 @@ class Transcriber:
                     continue  # sessao cancelada ou substituida: descarta sem colar nada
                 if audio is None:  # fim de sessao: grava no historico
                     try:
-                        if self._session_auto_enter and self._session_emitted and inject:
+                        # o sentinela chega com inject=None: usar o estado da sessao, nao o campo da fila
+                        if self._session_auto_enter and self._session_emitted and self._session_inject:
                             self._press_enter()
                         self._session_auto_enter = False
                         self._finalize_session()
