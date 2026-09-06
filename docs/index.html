@@ -45,6 +45,7 @@ h1 b{color:var(--acc);font-weight:800}
 .cta small{color:var(--ink3);font-size:13px;width:100%;margin-top:4px}
 .video{position:relative;border-radius:16px;overflow:hidden;background:#000;border:1px solid var(--bd);box-shadow:0 30px 80px rgba(0,0,0,.45)}
 .video video{display:block;width:100%;height:auto}
+.vcap{color:var(--ink3);font-size:13.5px;margin:10px 0 0}
 
 /* pilares */
 .pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:56px 0 0}
@@ -130,10 +131,13 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
         <small>Grátis. Open source (MIT). Precisa de uma GPU NVIDIA.</small>
       </div>
     </div>
-    <div class="video">
-      <video controls playsinline preload="metadata" poster="media/poster.jpg">
-        <source src="media/sussurro-promo.mp4" type="video/mp4">
-      </video>
+    <div>
+      <div class="video">
+        <video controls playsinline preload="metadata" poster="media/poster.jpg">
+          <source src="media/sussurro-promo.mp4" type="video/mp4">
+        </video>
+      </div>
+      <p class="vcap">Narração: Silvio Santos · <a href="#elon">versão com a voz do Elon Musk</a></p>
     </div>
   </header>
 
@@ -142,6 +146,16 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
     <div class="card reveal"><div class="dot"></div><h3>Grátis e aberto</h3><p>Código no GitHub sob licença MIT. Sem assinatura, sem versão Pro, sem pegadinha.</p></div>
     <div class="card reveal"><div class="dot"></div><h3>Feito pra escrever</h3><p>Transcrição simultânea, colagem no app que estiver em foco, biblioteca de termos e histórico com áudio.</p></div>
   </div>
+
+  <section id="elon">
+    <h2>A mesma demo, outra voz</h2>
+    <p class="sub">A gravação é o Sussurro de verdade, ditando no chat. Esta versão usa o perfil Elon Musk do OmniVoice Studio.</p>
+    <div class="video" style="max-width:720px">
+      <video controls playsinline preload="metadata" poster="media/poster-elon.jpg">
+        <source src="media/sussurro-promo-elon.mp4" type="video/mp4">
+      </video>
+    </div>
+  </section>
 
   <section id="como">
     <h2>Como funciona</h2>
