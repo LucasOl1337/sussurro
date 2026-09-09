@@ -2,6 +2,19 @@
 
 As mudanças de cada versão do Sussurro são registradas aqui. As versões seguem o formato `MAJOR.MINOR.PATCH`.
 
+## Não lançado — 2026-09-09
+
+- Modo colar respeitado no Codex/ChatGPT: removida a exceção que forçava digitação caractere a caractere. Terminais continuam usando Ctrl+Shift+V.
+- Interrupções do fluxo de áudio do fone descartam gestos de mute em andamento e pendentes, em vez de acionar o ditado. Detecção de mute por silêncio passa a ser opcional e desligada por padrão, pois o dispositivo também produz silêncio sem interação.
+- Pedidos de ativação por IPC e pelo fone registram origem e motivo no log de desempenho, sem conteúdo do ditado.
+
+## [0.3.1] — 2026-09-06
+
+### Corrigido
+
+- Colagem em terminais (foot, kitty, ghostty, …): o Sussurro envia Ctrl+Shift+V, o atalho nativo de colar, em vez de Ctrl+V. O Codex TUI trata Ctrl+V como colar imagem e mostrava `Failed to paste image` mesmo com texto no clipboard.
+- App desktop do Codex (classe `ChatGPT`): a transcrição é digitada, porque Ctrl+V cola imagem e Ctrl+Shift+V nesta máquina dispara a voz em tempo real.
+
 ## [0.3.0] — 2026-09-05
 
 Gestos do headset, barra que segue o monitor, site com vídeo e fontes com Xft no Linux.

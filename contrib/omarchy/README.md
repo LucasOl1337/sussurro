@@ -32,6 +32,8 @@ A aba **OMARCHY** do app aciona o ditado pelo headset MCHOSE X9 sem tocar no PC.
 | Roda de volume invertida rapido (vol+ e vol- em < 0,5 s) | evdev do *Consumer Control* do fone |
 | Toque duplo no mute (mic zerado por ate 7 s) | silencio digital no fluxo do mic, ignorando o aviso de voz (~1,5 s) |
 
+O gesto de mute fica desligado por padrao: silencio digital tambem pode ocorrer sem apertar o botao e causar ativacoes involuntarias. A roda usa eventos de botao do dispositivo e continua disponivel. Interrupcoes do fluxo de audio descartam a deteccao de mute pendente.
+
 Girar a roda em uma direcao so continua sendo volume. Com "Enter automatico" ligado, ao terminar de colar o Sussurro aperta Enter. O mic padrao do sistema segue o fone (X9 com som -> X9; mudo/desligado por 10 s -> mic reserva); para o Sussurro seguir o padrao, escolha o microfone `pipewire` no card de configuracao.
 
 Ler os botoes do fone sem root exige a regra udev. O botao **Instalar regra udev** da aba faz isso via `pkexec`; a mao:

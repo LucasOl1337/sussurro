@@ -90,6 +90,49 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(t._session_parts, ['previous'])
         self.assertEqual(t._session_id, 0)
 
+    def test_paste_strategy_routes_terminals_away_from_ctrl_v(self):
+        self.assertEqual(app.paste_strategy('foot'), 'terminal')
+        self.assertEqual(app.paste_strategy('kitty'), 'terminal')
+        self.assertEqual(app.paste_strategy('ChatGPT'), 'ctrl_v')
+        self.assertEqual(app.paste_strategy('chromium'), 'ctrl_v')
+        self.assertEqual(app.paste_strategy(None), 'ctrl_v')
+
+    def test_terminal_paste_sends_ctrl_shift_v(self):
+        t = self.transcriber()
+        with patch.object(app, '_is_wayland', return_value=True), \
+             patch.object(app.shutil, 'which', return_value='/usr/bin/wtype'), \
+             patch.object(app.subprocess, 'run') as run:
+            run.return_value = SimpleNamespace(returncode=0)
+            self.assertTrue(t._send_paste_key('terminal'))
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[0], 'wtype')
+            self.assertIn('shift', cmd)
+            self.assertNotEqual(cmd, ['wtype', '-M', 'ctrl', '-k', 'v', '-m', 'ctrl'])
+            self.assertTrue(t._send_paste_key('ctrl_v'))
+            self.assertEqual(run.call_args[0][0], ['wtype', '-M', 'ctrl', '-k', 'v', '-m', 'ctrl'])
+
+    def test_foot_paste_uses_terminal_chord(self):
+        t = self.transcriber()
+        with patch.object(app, 'focused_window_class', return_value='foot'), \
+             patch.object(app, 'backup_clipboard', return_value=b'orig'), \
+             patch.object(app, 'set_clipboard_text', return_value=True), \
+             patch.object(t, '_send_paste_key', return_value=True) as send:
+            t._paste_linux('texto ditado')
+            send.assert_called_once_with('terminal')
+
+    def test_codex_desktop_paste_uses_ctrl_v(self):
+        t = self.transcriber()
+        with patch.object(app, 'focused_window_class', return_value='ChatGPT'), \
+             patch.object(t, '_type_fallback') as type_fallback, \
+             patch.object(app, 'backup_clipboard', return_value=b'orig'), \
+             patch.object(threading.Timer, 'start'), \
+             patch.object(app, 'set_clipboard_text', return_value=True) as write, \
+             patch.object(t, '_send_paste_key', return_value=True) as send:
+            t._paste_linux('cole isto no Codex')
+            type_fallback.assert_not_called()
+            write.assert_called_once_with('cole isto no Codex')
+            send.assert_called_once_with('ctrl_v')
+
     def test_paste_returns_before_restore_and_restores_original(self):
         t = self.transcriber()
         clipboard = [b'original']

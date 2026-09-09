@@ -208,7 +208,7 @@ DEFAULT_SETTINGS = {
     "loopback_device_name": None,  # None = padrao do sistema
     "transcribe_mode": "simultaneo",  # simultaneo | final
     "language": "pt",
-    "inject_method": "colar",   # colar (Ctrl+V, clipboard preservado) | digitar
+    "inject_method": "colar",   # colar (clipboard + atalho do app focado) | digitar
     "dot_pos": [0.5, 0.94],     # posicao da bolinha, fracao da area util do monitor
     "devices": dict(devmod.DEFAULTS),  # gestos de dispositivos (aba OMARCHY, so Linux)
 }
@@ -330,6 +330,40 @@ def _hypr() -> Hypr:
     if _HYPR is None:
         _HYPR = Hypr()
     return _HYPR
+
+
+# Terminais cujo colar nativo e Ctrl+Shift+V. O Codex TUI trata Ctrl+V como
+# colar imagem; se o terminal encaminha a tecla, aparece "Failed to paste image"
+# mesmo com texto no clipboard.
+_TERMINAL_PASTE_CLASSES = frozenset({
+    "foot", "kitty", "alacritty", "ghostty", "com.mitchellh.ghostty",
+    "org.wezfurlong.wezterm", "wezterm", "org.gnome.terminal",
+    "gnome-terminal-server",
+})
+def paste_strategy(window_class: str | None) -> str:
+    """Atalho de colagem do app focado: terminal | ctrl_v.
+
+    O modo colar sempre usa o clipboard, inclusive no Codex/ChatGPT.
+    Digitar e uma escolha separada nas configuracoes.
+    """
+    cls = (window_class or "").strip().lower()
+    if not cls:
+        return "ctrl_v"
+    if cls in _TERMINAL_PASTE_CLASSES:
+        return "terminal"
+    return "ctrl_v"
+
+
+def focused_window_class() -> str | None:
+    if IS_WIN:
+        return None
+    h = _hypr()
+    if not h.available:
+        return None
+    win = h.activewindow()
+    if not isinstance(win, dict):
+        return None
+    return win.get("class") or win.get("initialClass")
 
 
 def monitor_work_area(x: int, y: int):
@@ -701,6 +735,25 @@ def _fecha_frase(s: str) -> str:
     return s + "."
 
 
+def load_audio_16k_mono(path: Path) -> "np.ndarray":
+    """Decodifica qualquer audio (ogg/opus do WhatsApp, mp3, m4a, wav) em float32 mono 16 kHz.
+
+    O ffmpeg faz a conversao porque o whisper aqui sempre recebe o mesmo formato do
+    microfone; assim o arquivo entra pelo mesmo caminho do ditado.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg nao encontrado no PATH")
+    proc = subprocess.run(
+        [ffmpeg, "-nostdin", "-v", "error", "-i", str(path),
+         "-f", "f32le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    if proc.returncode != 0:
+        detalhe = proc.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["falha"]
+        raise RuntimeError(f"ffmpeg: {detalhe[0]}")
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+
+
 def format_transcript(segments) -> str:
     """Pontua e quebra o texto do whisper sem reescrever.
 
@@ -811,6 +864,7 @@ class Transcriber:
         self._resamplers: list = []   # um resampler por stream (taxa nativa != 16 kHz)
         self._slot = 0                # indice do stream sendo aberto em start()
         self._mix_lock = threading.Lock()
+        self._model_lock = threading.Lock()  # serializa ditado e transcricao de arquivo (IPC)
         self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
         self._session_inject = False
         self._session_mode = "simultaneo"
@@ -1162,12 +1216,8 @@ class Transcriber:
                     continue
                 t0 = time.perf_counter()
                 lang = None if self.language == "auto" else self.language
-                segments, _info = self.model.transcribe(
-                    audio, language=lang, beam_size=5, vad_filter=(mode == "final"),
-                    # enviesa a decodificacao pros termos da Biblioteca: e o que evita
-                    # o whisper inventar "Nightingale" no lugar de "9router"
-                    hotwords=self.library.hotwords,
-                )
+                segments, _info = self._transcribe_locked(
+                    audio, language=lang, vad_filter=(mode == "final"))
                 text = format_transcript(segments)
                 text, fixes = self.library.apply(text)  # troca da Biblioteca antes de sair daqui
                 if sid != self._session_id:
@@ -1202,14 +1252,50 @@ class Transcriber:
                 if deve_baixar and sid == self._session_id:
                     self._pending_done()
 
-    def _finalize_session(self):
-        parts, self._session_parts = self._session_parts, []
-        text = _join_session_text(parts)
+    def _transcribe_locked(self, audio, *, language, vad_filter):
+        """Inferencia serializada: o ditado e a transcricao de arquivo (IPC) dividem um
+        unico modelo na GPU, entao duas chamadas simultaneas competem pela mesma VRAM.
+
+        hotwords enviesa a decodificacao pros termos da Biblioteca: e o que evita o
+        whisper inventar "Nightingale" no lugar de "9router". Consome o gerador aqui
+        dentro para a inferencia acontecer com o lock ainda tomado.
+        """
+        with self._model_lock:
+            segments, info = self.model.transcribe(
+                audio, language=language, beam_size=5, vad_filter=vad_filter,
+                hotwords=self.library.hotwords,
+            )
+            return list(segments), info
+
+    def transcribe_file(self, path: str) -> dict:
+        """Transcreve um arquivo de audio e arquiva no historico, sem microfone nem colagem.
+
+        Usado pelo IPC (`sussurro transcribe <arquivo>`), que e como o Hermes manda os
+        audios do WhatsApp. Retorna o mesmo dict que vai pro history.jsonl.
+        """
+        if self.model is None:
+            raise RuntimeError("modelo ainda nao esta pronto")
+        src = Path(path).expanduser()
+        if not src.is_file():
+            raise FileNotFoundError(str(src))
+        audio = load_audio_16k_mono(src)
+        if audio.size == 0:
+            raise ValueError("audio vazio")
+        t0 = time.perf_counter()
+        lang = None if self.language == "auto" else self.language
+        segments, _info = self._transcribe_locked(audio, language=lang, vad_filter=True)
+        text = format_transcript(segments)
+        text, fixes = self.library.apply(text)
         if not text:
-            return
-        started = self._session_started or datetime.now()
-        audio = np.concatenate([a for a, _t, _f, *_ in parts])
-        fixes = sum(f for _a, _t, f, *_ in parts)
+            raise ValueError("nenhuma fala reconhecida")
+        entry = self._archive_audio(audio, text, fixes, datetime.now())
+        _perf("file_done", source=src.name, audio_s=round(audio.size / SAMPLE_RATE, 3),
+              inference_ms=round((time.perf_counter() - t0) * 1000, 1))
+        self.status_queue.put(f"Arquivo transcrito ({audio.size / SAMPLE_RATE:.1f}s).")
+        return entry
+
+    def _archive_audio(self, audio, text: str, fixes: int, started: datetime) -> dict:
+        """Grava o wav e a linha do history.jsonl, e avisa a UI pela history_queue."""
         HISTORY_DIR.mkdir(exist_ok=True)
         wav_name = started.strftime("%Y%m%d_%H%M%S") + ".wav"
         with wave.open(str(HISTORY_DIR / wav_name), "wb") as w:
@@ -1223,9 +1309,20 @@ class Transcriber:
         with HISTORY_INDEX.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self.history_queue.put(entry)
+        return entry
+
+    def _finalize_session(self):
+        parts, self._session_parts = self._session_parts, []
+        text = _join_session_text(parts)
+        if not text:
+            return
+        started = self._session_started or datetime.now()
+        audio = np.concatenate([a for a, _t, _f, *_ in parts])
+        fixes = sum(f for _a, _t, f, *_ in parts)
+        self._archive_audio(audio, text, fixes, started)
 
     def _paste(self, text: str):
-        """Cola via Ctrl+V preservando o clipboard original (imagens, arquivos etc.)."""
+        """Cola no app focado preservando o clipboard original (imagens, arquivos etc.)."""
         if not IS_WIN:
             return self._paste_linux(text)
         backup = backup_clipboard()
@@ -1253,6 +1350,7 @@ class Transcriber:
             self._clipboard_restore = None
 
     def _paste_linux(self, text: str):
+        strategy = paste_strategy(focused_window_class())
         with self._clipboard_lock:
             if self._clipboard_restore is not None:
                 self._clipboard_timer.cancel()
@@ -1264,7 +1362,7 @@ class Transcriber:
                 self._type_fallback(text)
                 return
             time.sleep(0.05)
-            if not self._send_paste_key():
+            if not self._send_paste_key(strategy):
                 with self._keyboard.pressed(keyboard.Key.ctrl):
                     self._keyboard.press("v")
                     self._keyboard.release("v")
@@ -1294,15 +1392,20 @@ class Transcriber:
         self._keyboard.press(keyboard.Key.enter)
         self._keyboard.release(keyboard.Key.enter)
 
-    def _send_paste_key(self) -> bool:
-        """No Wayland o pynput nao injeta tecla no app focado; wtype sim."""
+    def _send_paste_key(self, strategy: str = "ctrl_v") -> bool:
+        """No Wayland o pynput nao injeta tecla no app focado; wtype sim.
+
+        `terminal` usa Ctrl+Shift+V (colar nativo do foot/kitty/ghostty) para o
+        Codex TUI nao receber Ctrl+V como colar-imagem.
+        """
         if not _is_wayland() or not shutil.which("wtype"):
             return False
+        if strategy == "terminal":
+            cmd = ["wtype", "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
+        else:
+            cmd = ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"]
         try:
-            r = subprocess.run(
-                ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
-                timeout=2, check=False, capture_output=True,
-            )
+            r = subprocess.run(cmd, timeout=2, check=False, capture_output=True)
             return r.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
@@ -1470,10 +1573,13 @@ class RecorderBar:
     def _follow(self):
         if not self._dragging:
             x, y = self._target_xy()
-            self.win.geometry(f"+{x}+{y}")
+            if not self.hypr or not _hypr().place_bar(x, y):
+                self.win.geometry(f"+{x}+{y}")
 
     # -- ciclo de vida -------------------------------------------------------
     def show(self, state: str):
+        if self.hypr:
+            _hypr().reset_bar_placement()
         self._state = state
         self._follow()
         self.win.deiconify()
@@ -1686,7 +1792,13 @@ class IpcServer(threading.Thread):
                     continue
                 with conn:
                     conn.settimeout(1)
-                    raw = conn.recv(64).decode("utf-8", "replace").strip().lower()
+                    raw = conn.recv(4096).decode("utf-8", "replace").strip()
+                    if raw.split(" ", 1)[0].lower() == "transcribe":
+                        # transcricao de arquivo leva segundos: responder aqui deixaria o
+                        # atalho do mouse esperando. Sai da thread do accept.
+                        threading.Thread(target=self._serve_slow, args=(conn.dup(), raw),
+                                         name="sussurro-ipc-file", daemon=True).start()
+                        continue
                     conn.sendall(self._handle(raw).encode("utf-8"))
         except Exception:
             traceback.print_exc()
@@ -1699,11 +1811,25 @@ class IpcServer(threading.Thread):
             except OSError:
                 pass
 
+    def _serve_slow(self, conn, raw: str) -> None:
+        """Responde um `transcribe` fora da thread do accept, que precisa ficar livre."""
+        with conn:
+            conn.settimeout(900)
+            try:
+                conn.sendall(self._handle(raw).encode("utf-8"))
+            except OSError:
+                pass  # cliente desistiu de esperar
+
     def _handle(self, data: str) -> str:
+        verb, _, arg = data.partition(" ")
+        if verb.lower() == "transcribe":
+            return self._handle_transcribe(arg.strip())
+        data = data.lower()
         # "toggle-enter"/"start-enter"/"stop-enter": veio do fone (daemon x9-sussurro);
         # ao terminar de colar, o Sussurro aperta Enter para confirmar o envio.
         base, _, flag = data.partition("-")
         if base in ("toggle", "start", "stop") and flag in ("", "enter"):
+            _perf("activation_request", source="ipc", command=data)
             self.event_queue.put((base, {"enter": True} if flag == "enter" else None))
             return "ok\n"
         if data == "status":
@@ -1714,6 +1840,20 @@ class IpcServer(threading.Thread):
                                "recording": t.recording.is_set(), "busy": t.busy(),
                                "model": "large-v3", "device": "cuda", "compute_type": "float16"}) + "\n"
         return "err unknown\n"
+
+    def _handle_transcribe(self, path: str) -> str:
+        """`transcribe <arquivo>`: transcreve, arquiva no historico e devolve JSON."""
+        if not path:
+            return json.dumps({"ok": False, "error": "uso: transcribe <arquivo>"}) + "\n"
+        if self.transcriber is None:
+            return json.dumps({"ok": False, "error": "transcritor indisponivel"}) + "\n"
+        try:
+            entry = self.transcriber.transcribe_file(path)
+        except Exception as e:
+            traceback.print_exc()
+            return json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                              ensure_ascii=False) + "\n"
+        return json.dumps({"ok": True, **entry}, ensure_ascii=False) + "\n"
 
 
 def _wants_enter(payload) -> bool:
@@ -2847,6 +2987,7 @@ class App:
 
     def _on_device_gesture(self, _why: str):
         """Gesto do fone: liga/desliga o ditado; com Enter no fim se auto_enter estiver ligado."""
+        _perf("activation_request", source="headset", reason=_why)
         self.hotkey_queue.put(("toggle", {"enter": bool(self.devcfg.get("auto_enter", True))}))
 
     def _on_dev_switch(self, key: str):

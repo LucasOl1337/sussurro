@@ -67,7 +67,7 @@ DEFAULTS = {
     "profile": "mchose_x9",
     "auto_enter": True,        # ao terminar de colar, aperta Enter (ditar longe do PC)
     "wheel_gesture": True,
-    "mute_gesture": True,
+    "mute_gesture": False,     # opt-in: silencio digital tambem ocorre sem apertar mute
     "reversal_window": 0.5,    # s
     "tap_max": 7.0,            # s
     "mic_follow": True,
@@ -361,13 +361,18 @@ class DeviceGestures:
             else:
                 new = "NODATA"
 
+            if new == "NODATA":
+                # Fluxo interrompido nao e soltar o mute. Descartar tambem
+                # o gesto pendente: falta audio para confirmar sua continuidade.
+                zero_start = pending = None
+
             if new != state:
                 if new == "ZERO":
                     if pending and now - pending[1] < MERGE_GAP:
                         zero_start, pending = pending[0], None
                     else:
                         zero_start = now
-                elif state == "ZERO" and zero_start is not None:
+                elif new == "SOM" and state == "ZERO" and zero_start is not None:
                     pending, zero_start = (zero_start, now), None
                 state, state_since = new, now
                 self.mic_state = {"SOM": "com som", "ZERO": "mudo (zerado)",
