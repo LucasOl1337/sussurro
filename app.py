@@ -858,6 +858,8 @@ class Transcriber:
         self._audio_queue: queue.Queue = queue.Queue()
         self._segment_queue: queue.Queue = queue.Queue()
         self._session_parts: list = []
+        self._session_audio: list = []
+        self._session_errors: list[str] = []
         self._session_started = None
         self._stop_requested_at = None
         self._streams: list = []
@@ -865,6 +867,8 @@ class Transcriber:
         self._slot = 0                # indice do stream sendo aberto em start()
         self._mix_lock = threading.Lock()
         self._model_lock = threading.Lock()  # serializa ditado e transcricao de arquivo (IPC)
+        self._history_lock = threading.Lock()
+        self._retrying = threading.Event()
         self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
         self._session_inject = False
         self._session_mode = "simultaneo"
@@ -1039,6 +1043,8 @@ class Transcriber:
         self._stop_requested_at = None
         self._session_id += 1
         self._session_parts = []
+        self._session_audio = []
+        self._session_errors = []
         self.levels.clear()
         with self._pending_lock:
             self._pending = 0
@@ -1088,7 +1094,8 @@ class Transcriber:
         """
         with self._pending_lock:
             pendentes = self._pending
-        return self.recording.is_set() or not self._drained or pendentes > 0
+        return (self.recording.is_set() or not self._drained or pendentes > 0
+                or self._retrying.is_set())
 
     def _pending_done(self):
         with self._pending_lock:
@@ -1118,6 +1125,8 @@ class Transcriber:
                 except queue.Empty:
                     break
         self._session_parts = []
+        self._session_audio = []
+        self._session_errors = []
         self.levels.clear()
         with self._pending_lock:
             self._pending = 0
@@ -1189,6 +1198,9 @@ class Transcriber:
 
     def _enqueue_segment(self, audio: np.ndarray, lead_s: float = 0.0):
         self._session_had_speech = True
+        # O audio pertence ao historico mesmo se o Whisper falhar. Antes ele so
+        # sobrevivia quando a transcricao chegava ate _session_parts.
+        self._session_audio.append(audio)
         with self._pending_lock:
             self._pending += 1
         self._segment_queue.put((audio, self._session_inject, self._session_mode,
@@ -1247,6 +1259,8 @@ class Transcriber:
                 self.status_queue.put(f"{state}  (trecho de {audio.size / SAMPLE_RATE:.1f}s em {dt:.1f}s)")
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
+                if deve_baixar and sid == self._session_id:
+                    self._session_errors.append(f"{type(e).__name__}: {e}")
                 self.status_queue.put(f"ERRO na transcricao: {e}")
             finally:
                 if deve_baixar and sid == self._session_id:
@@ -1294,8 +1308,9 @@ class Transcriber:
         self.status_queue.put(f"Arquivo transcrito ({audio.size / SAMPLE_RATE:.1f}s).")
         return entry
 
-    def _archive_audio(self, audio, text: str, fixes: int, started: datetime) -> dict:
-        """Grava o wav e a linha do history.jsonl, e avisa a UI pela history_queue."""
+    def _archive_audio(self, audio, text: str, fixes: int, started: datetime, *,
+                       failed: bool = False, error: str | None = None) -> dict:
+        """Grava o WAV e seu registro, inclusive quando a transcricao falhou."""
         HISTORY_DIR.mkdir(exist_ok=True)
         wav_name = started.strftime("%Y%m%d_%H%M%S") + ".wav"
         with wave.open(str(HISTORY_DIR / wav_name), "wb") as w:
@@ -1304,22 +1319,103 @@ class Transcriber:
             w.setframerate(SAMPLE_RATE)
             w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
         # dur e fix alimentam a aba ESTATISTICAS; entrada antiga sem eles usa o wav / zero
-        entry = {"ts": started.isoformat(timespec="seconds"), "wav": wav_name, "text": text,
-                 "dur": round(audio.size / SAMPLE_RATE, 2), "fix": fixes}
-        with HISTORY_INDEX.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        entry = {"ts": started.isoformat(timespec="seconds"), "wav": wav_name,
+                 "text": text, "dur": round(audio.size / SAMPLE_RATE, 2), "fix": fixes}
+        if failed:
+            entry["failed"] = True
+            entry["error"] = error or "Nenhuma fala reconhecida."
+        with self._history_lock:
+            with HISTORY_INDEX.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self.history_queue.put(entry)
         return entry
 
     def _finalize_session(self):
         parts, self._session_parts = self._session_parts, []
-        text = _join_session_text(parts)
-        if not text:
+        audio_parts, self._session_audio = self._session_audio, []
+        errors, self._session_errors = self._session_errors, []
+        if not audio_parts:
             return
+        text = _join_session_text(parts)
         started = self._session_started or datetime.now()
-        audio = np.concatenate([a for a, _t, _f, *_ in parts])
+        audio = np.concatenate(audio_parts)
         fixes = sum(f for _a, _t, f, *_ in parts)
-        self._archive_audio(audio, text, fixes, started)
+        failed = bool(errors) or not text
+        error = errors[-1] if errors else ("Nenhuma fala reconhecida." if not text else None)
+        self._archive_audio(audio, text, fixes, started, failed=failed, error=error)
+
+    def _replace_history_entry(self, entry: dict) -> None:
+        """Atualiza uma linha pelo nome do WAV sem arriscar truncar o historico."""
+        with self._history_lock:
+            lines = []
+            replaced = False
+            if HISTORY_INDEX.exists():
+                for raw in HISTORY_INDEX.read_text(encoding="utf-8").splitlines():
+                    if not raw.strip():
+                        continue
+                    current = json.loads(raw)
+                    if current.get("wav") == entry.get("wav"):
+                        current = entry
+                        replaced = True
+                    lines.append(json.dumps(current, ensure_ascii=False))
+            if not replaced:
+                lines.append(json.dumps(entry, ensure_ascii=False))
+            temporary = HISTORY_INDEX.with_suffix(".jsonl.tmp")
+            temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.replace(temporary, HISTORY_INDEX)
+
+    def retry_history_async(self, entry: dict) -> None:
+        """Tenta novamente um WAV falho e atualiza o registro existente em background."""
+        if self.model is None:
+            raise RuntimeError("Modelo ainda carregando — aguarde.")
+        if self.busy():
+            raise RuntimeError("Aguarde o trabalho atual terminar.")
+        wav_name = str(entry.get("wav", ""))
+        if not wav_name or Path(wav_name).name != wav_name:
+            raise ValueError("arquivo de historico invalido")
+        path = HISTORY_DIR / wav_name
+        if not path.is_file():
+            raise FileNotFoundError(str(path))
+        self._retrying.set()
+        self.status_queue.put("Tentando transcrever o audio novamente...")
+        threading.Thread(target=self._retry_history_worker, args=(dict(entry), path),
+                         name="sussurro-history-retry", daemon=True).start()
+
+    def _retry_history_worker(self, entry: dict, path: Path) -> None:
+        try:
+            audio = load_audio_16k_mono(path)
+            if audio.size == 0:
+                raise ValueError("audio vazio")
+            started = time.perf_counter()
+            lang = None if self.language == "auto" else self.language
+            segments, _info = self._transcribe_locked(audio, language=lang, vad_filter=True)
+            text = format_transcript(segments)
+            text, fixes = self.library.apply(text)
+            if not text:
+                raise ValueError("nenhuma fala reconhecida")
+            updated = {**entry, "text": text, "dur": round(audio.size / SAMPLE_RATE, 2),
+                       "fix": fixes}
+            updated.pop("failed", None)
+            updated.pop("error", None)
+            updated.pop("retrying", None)
+            self._replace_history_entry(updated)
+            self.history_queue.put(updated)
+            _perf("history_retry_done", wav=path.name,
+                  audio_s=round(audio.size / SAMPLE_RATE, 3),
+                  inference_ms=round((time.perf_counter() - started) * 1000, 1))
+            self.status_queue.put("Audio recuperado e transcrito.")
+        except Exception as e:
+            traceback.print_exc()
+            failed = {**entry, "failed": True, "error": f"{type(e).__name__}: {e}"}
+            failed.pop("retrying", None)
+            try:
+                self._replace_history_entry(failed)
+                self.history_queue.put(failed)
+            except Exception:
+                traceback.print_exc()
+            self.status_queue.put(f"ERRO ao tentar novamente: {e}")
+        finally:
+            self._retrying.clear()
 
     def _paste(self, text: str):
         """Cola no app focado preservando o clipboard original (imagens, arquivos etc.)."""
@@ -2011,6 +2107,7 @@ def _streaks(dias: set) -> tuple:
 
 def compute_stats(entries: list) -> dict:
     """Uma passada sobre o historico inteiro; ~90 entradas custam milissegundos."""
+    entries = [entry for entry in entries if not entry.get("failed")]
     total_palavras = 0
     total_segundos = 0.0
     correcoes = 0
@@ -2168,13 +2265,14 @@ class HistoryList(ctk.CTkFrame):
     """Historico num canvas so. CTkFrame por linha trava o Tk uns 3s no restore
     (Configure -> _draw em cada canvas); item de canvas pinta na hora."""
 
-    def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy):
+    def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy, on_retry):
         super().__init__(master, fg_color="transparent", width=1, height=1)
         self.font_mono = font_mono
         self.font_ui = font_ui
         self.day_label = day_label
         self.on_play = on_play
         self.on_copy = on_copy
+        self.on_retry = on_retry
         self._entries = []
         self._width = 0
         self._hits = []
@@ -2259,7 +2357,9 @@ class HistoryList(ctk.CTkFrame):
     def _on_motion(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         h, zone = self._hit(x, y)
-        self.canvas.configure(cursor="hand2" if zone in ("play", "copy", "text") else "")
+        failed = h is not None and self._entries[h["i"]].get("failed")
+        clickable = zone in ("play", "copy", "text") or (failed and zone == "row")
+        self.canvas.configure(cursor="hand2" if clickable else "")
         idx = None if h is None else h["i"]
         if idx == self._hover:
             return
@@ -2287,6 +2387,8 @@ class HistoryList(ctk.CTkFrame):
         entry = self._entries[h["i"]]
         if zone == "play":
             self.on_play(str(HISTORY_DIR / entry["wav"]))
+        elif entry.get("failed"):
+            self.on_retry(entry)
         elif zone in ("copy", "text"):
             self.on_copy(entry["text"])
 
@@ -2333,10 +2435,14 @@ class HistoryList(ctk.CTkFrame):
             even = day_i % 2 == 1
             day_i += 1
             base = ROW_EVEN if even else SURFACE
+            failed = bool(entry.get("failed"))
+            retrying = bool(entry.get("retrying"))
+            shown_text = ("Tentando transcrever novamente..." if retrying else
+                          "A transcrição falhou. Clique para tentar novamente.") if failed else entry["text"]
             text_x = padx + time_w + s(6)
             text_w = max(s(80), w - text_x - btns_w)
             tid = self.canvas.create_text(
-                text_x, y + pady, text=entry["text"], fill=INK, anchor="nw",
+                text_x, y + pady, text=shown_text, fill=ACCENT_TEXT if failed else INK, anchor="nw",
                 width=text_w, font=font_text, justify="left")
             tb = self.canvas.bbox(tid)
             th = tb[3] - tb[1]
@@ -2356,7 +2462,9 @@ class HistoryList(ctk.CTkFrame):
                 (play_x0 + play_x1) / 2, by + btn / 2, text="▶", fill=INK_2,
                 font=font_btn, anchor="center")
             self.canvas.create_text(
-                (copy_x0 + copy_x1) / 2, by + btn / 2, text="⧉", fill=INK_2,
+                (copy_x0 + copy_x1) / 2, by + btn / 2,
+                text="…" if retrying else ("↻" if failed else "⧉"),
+                fill=ACCENT_TEXT if failed else INK_2,
                 font=font_btn, anchor="center")
             self._hits.append({
                 "i": i, "y0": y, "y1": y + row_h,
@@ -2554,7 +2662,8 @@ class App:
         self._playing = None
         self.hist_frame = HistoryList(
             self.content, font_mono=self.FONT_MONO, font_ui=self.FONT_UI,
-            day_label=self._day_label, on_play=self._play, on_copy=self._copy_entry)
+            day_label=self._day_label, on_play=self._play, on_copy=self._copy_entry,
+            on_retry=self._retry_entry)
         self.text = ctk.CTkTextbox(self.content, fg_color="transparent", text_color=INK,
                                    font=(self.FONT_UI, 13), wrap="word", border_width=0)
         self.library = self.transcriber.library
@@ -2630,7 +2739,12 @@ class App:
         self.hist_frame.set_entries(self.entries[:HIST_RENDER_MAX])
 
     def _add_history(self, entry: dict):
-        self.entries.insert(0, entry)
+        for i, current in enumerate(self.entries):
+            if current.get("wav") == entry.get("wav"):
+                self.entries[i] = entry
+                break
+        else:
+            self.entries.insert(0, entry)
         self.hist_frame.set_entries(self.entries[:HIST_RENDER_MAX])
         self._stats_dirty = True
         if self._tab == "estatisticas":
@@ -2640,6 +2754,17 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.status.configure(text="Transcricao copiada para a area de transferencia.")
+
+    def _retry_entry(self, entry: dict):
+        if entry.get("retrying"):
+            return
+        try:
+            self.transcriber.retry_history_async(entry)
+        except Exception as e:
+            self.status.configure(text=f"ERRO ao tentar novamente: {e}")
+            return
+        entry["retrying"] = True
+        self._render_history()
 
     def _play(self, path: str):
         if self._playing == path:

@@ -210,6 +210,53 @@ class LatencyTests(unittest.TestCase):
         self.assertTrue(status['busy'])
         self.assertFalse(status['recording'])
 
+    def test_transcription_failure_still_archives_audio(self):
+        t = self.transcriber()
+        audio = np.linspace(-.2, .2, app.SAMPLE_RATE, dtype=np.float32)
+        t._session_id = 1
+        t._session_started = app.datetime(2026, 9, 10, 8, 34, 22)
+        t._drained = False
+        t._session_mode = 'final'
+        t._enqueue_segment(audio)
+        t._segment_queue.put((None, None, None, 1, 0.0))
+        events = iter([t._segment_queue.get_nowait(), t._segment_queue.get_nowait()])
+        t._segment_queue.get = lambda: next(events)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(app, 'HISTORY_DIR', Path(directory)), \
+             patch.object(app, 'HISTORY_INDEX', Path(directory) / 'history.jsonl'), \
+             patch.object(t, '_transcribe_locked', side_effect=RuntimeError('CUDA indisponivel')), \
+             patch.object(app.traceback, 'print_exc'):
+            with self.assertRaises(StopIteration):
+                t._transcribe_loop()
+            entries = [json.loads(line) for line in app.HISTORY_INDEX.read_text().splitlines()]
+            self.assertEqual(len(entries), 1)
+            self.assertTrue(entries[0]['failed'])
+            self.assertIn('CUDA indisponivel', entries[0]['error'])
+            self.assertEqual(entries[0]['text'], '')
+            self.assertTrue((app.HISTORY_DIR / entries[0]['wav']).is_file())
+
+    def test_retry_replaces_failed_history_entry(self):
+        t = self.transcriber()
+        audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * .05
+        segment = SimpleNamespace(text=' instrucao recuperada', start=0.0, end=1.0)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(app, 'HISTORY_DIR', Path(directory)), \
+             patch.object(app, 'HISTORY_INDEX', Path(directory) / 'history.jsonl'), \
+             patch.object(app, 'load_audio_16k_mono', return_value=audio), \
+             patch.object(t, '_transcribe_locked', return_value=([segment], None)):
+            entry = t._archive_audio(audio, '', 0, app.datetime(2026, 9, 10, 8, 34, 22),
+                                     failed=True, error='falha inicial')
+            t.history_queue.get_nowait()
+            t._retrying.set()
+            t._retry_history_worker(entry, app.HISTORY_DIR / entry['wav'])
+            entries = [json.loads(line) for line in app.HISTORY_INDEX.read_text().splitlines()]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]['text'], 'instrucao recuperada')
+            self.assertNotIn('failed', entries[0])
+            self.assertNotIn('error', entries[0])
+            self.assertEqual(t.history_queue.get_nowait(), entries[0])
+            self.assertFalse(t._retrying.is_set())
+
 
 if __name__ == '__main__':
     unittest.main()

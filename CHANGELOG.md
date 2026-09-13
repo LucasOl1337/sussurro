@@ -4,6 +4,7 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## Não lançado — 2026-09-09
 
+- Gravações cuja transcrição falha agora preservam o WAV no histórico. A entrada exibe a falha e permite tentar novamente; quando funciona, o mesmo registro recebe o texto sem duplicar o áudio.
 - Modo colar respeitado no Codex/ChatGPT: removida a exceção que forçava digitação caractere a caractere. Terminais continuam usando Ctrl+Shift+V.
 - Interrupções do fluxo de áudio do fone descartam gestos de mute em andamento e pendentes, em vez de acionar o ditado. Detecção de mute por silêncio passa a ser opcional e desligada por padrão, pois o dispositivo também produz silêncio sem interação.
 - Pedidos de ativação por IPC e pelo fone registram origem e motivo no log de desempenho, sem conteúdo do ditado.
