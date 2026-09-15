@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sussurro — ditado local em português</title>
-<meta name="description" content="Fale e o texto aparece onde o cursor estiver. Ditado local com Whisper large-v3 na sua GPU: grátis, open source, Windows e Linux. Nenhum áudio sai do seu computador.">
+<meta name="description" content="Fale e o texto aparece onde o cursor estiver. Ditado local com Whisper Turbo na GPU ou Base na CPU: grátis, open source, Windows e Linux. Nenhum áudio sai do seu computador.">
 <meta property="og:title" content="Sussurro — Fale. O texto aparece.">
 <meta property="og:description" content="Ditado local em português, grátis e open source. Nenhum áudio sai do seu computador.">
 <meta property="og:image" content="media/poster.jpg">
@@ -128,7 +128,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
       <div class="cta">
         <a class="btn acc" href="https://github.com/LucasOl1337/sussurro/releases">Baixar no GitHub</a>
         <a class="btn ghost" href="https://github.com/LucasOl1337/sussurro">Ver o código</a>
-        <small>Grátis. Open source (MIT). Precisa de uma GPU NVIDIA.</small>
+        <small>Grátis. Open source (MIT). CPU ou GPU NVIDIA.</small>
       </div>
     </div>
     <div>
@@ -142,7 +142,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
   </header>
 
   <div class="pillars">
-    <div class="card reveal"><div class="dot"></div><h3>100% local</h3><p>Whisper large-v3 rodando na sua GPU. Sem conta, sem nuvem, sem limite de palavras.</p></div>
+    <div class="card reveal"><div class="dot"></div><h3>100% local</h3><p>Whisper com modelo selecionável, na CPU ou GPU. Sem conta, sem nuvem, sem limite de palavras.</p></div>
     <div class="card reveal"><div class="dot"></div><h3>Grátis e aberto</h3><p>Código no GitHub sob licença MIT. Sem assinatura, sem versão Pro, sem pegadinha.</p></div>
     <div class="card reveal"><div class="dot"></div><h3>Feito pra escrever</h3><p>Transcrição simultânea, colagem no app que estiver em foco, biblioteca de termos e histórico com áudio.</p></div>
   </div>
@@ -211,7 +211,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
     <div class="nums">
       <div class="num reveal"><b>~1,2 s</b><span>do fim da fala ao texto colado, num trecho de 30 s (RTX 4070 Ti Super)</span></div>
       <div class="num reveal"><b>0</b><span>bytes de áudio enviados pra fora da sua máquina</span></div>
-      <div class="num reveal"><b>large-v3</b><span>o maior modelo Whisper, em float16 na sua GPU</span></div>
+      <div class="num reveal"><b>Turbo</b><span>padrão na GPU; Base na CPU; seis modelos à escolha</span></div>
       <div class="num reveal"><b>MIT</b><span>licença. Use, modifique, redistribua</span></div>
     </div>
   </section>
@@ -243,7 +243,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
         <tr><td>Corrigir termos que o modelo erra</td><td class="y">Biblioteca fonética local</td><td class="n">Dicionário na conta</td></tr>
         <tr><td>Histórico com áudio, estatísticas</td><td class="y">Sim, no seu disco</td><td class="n">Histórico na nuvem</td></tr>
         <tr><td>Acionar pelo headset, Enter automático</td><td class="y">Sim (Omarchy / Hyprland)</td><td class="n">Não</td></tr>
-        <tr><td>Requisito</td><td class="n">GPU NVIDIA</td><td class="y">Qualquer máquina</td></tr>
+        <tr><td>Requisito</td><td class="y">CPU ou GPU NVIDIA</td><td class="y">Qualquer máquina</td></tr>
       </tbody>
     </table>
     <p class="foot-note">Dados do Wispr Flow conforme a página de preços e a documentação pública em setembro de 2026. Se algo mudou, <a href="https://github.com/LucasOl1337/sussurro/issues">abra um issue</a>.</p>
@@ -251,13 +251,13 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
 
   <section id="instalar">
     <h2>Instalar</h2>
-    <p class="sub">Python 3.11 ou mais novo, GPU NVIDIA, e pronto. As bibliotecas CUDA vêm pelos wheels da NVIDIA.</p>
+    <p class="sub">Python e microfone, com GPU NVIDIA opcional. Use requirements.txt para CPU ou requirements-cuda.txt para CUDA.</p>
     <div class="two">
       <div><h4>Linux</h4><pre><span class="c"># clone e crie o ambiente</span>
 git clone https://github.com/LucasOl1337/sussurro
 cd sussurro
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-cuda.txt
 
 <span class="c"># rode</span>
 .venv/bin/python app.py</pre></div>
@@ -265,7 +265,7 @@ python3 -m venv .venv
 git clone https://github.com/LucasOl1337/sussurro
 cd sussurro
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\pip install -r requirements-cuda.txt
 
 <span class="c">:: rode</span>
 .venv\Scripts\python app.py</pre></div>

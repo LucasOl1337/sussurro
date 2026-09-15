@@ -2,19 +2,21 @@
 
 Ditado local para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Tudo roda na sua máquina — nenhum áudio sai do computador.
 
-[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.3.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.3.0) · [Changelog](CHANGELOG.md)
+[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.4.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.4.0) · [Changelog](CHANGELOG.md)
 
-O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper `large-v3` em CUDA (float16)**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
+O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper **Turbo na GPU ou Base na CPU**, com modelo selecionável**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 
 ## Requisitos
 
-- Windows 10/11 **ou** Linux (X11 + PulseAudio ou PipeWire; GPU NVIDIA)
+- Windows 10/11 **ou** Linux (X11/Wayland + PulseAudio ou PipeWire)
 - Python 3.11
-- GPU NVIDIA (o modelo carrega com `device="cuda", compute_type="float16"`; sem GPU o modelo não sobe neste código)
+- CPU para transcrição local; GPU NVIDIA com CUDA é opcional e acelera o ditado
 - Microfone qualquer (a captura tenta 16 kHz e, se o dispositivo não aceitar, reamostra da taxa nativa)
 - Linux, para colar via clipboard: `wl-clipboard` e `wtype` (Wayland) ou `xclip`/`xsel` (X11). Em Wayland, configure um atalho no compositor para encaminhar os comandos de gravação. Sem ferramenta de clipboard o envio `colar` cai no modo `digitar`.
 
 ## Instalação
+
+Os comandos abaixo instalam o suporte a GPU NVIDIA. **Sem GPU dedicada**, troque `requirements-cuda.txt` por `requirements.txt`: a instalação em CPU dispensa os pacotes CUDA.
 
 Com [uv](https://docs.astral.sh/uv/) (recomendado):
 
@@ -22,14 +24,14 @@ Windows:
 
 ```bat
 uv venv --python 3.11
-uv pip install -r requirements.txt
+uv pip install -r requirements-cuda.txt
 ```
 
 Linux:
 
 ```bash
 uv venv --python 3.11
-uv pip install -r requirements.txt
+uv pip install -r requirements-cuda.txt
 ```
 
 Ou com venv + pip:
@@ -38,17 +40,17 @@ Windows:
 
 ```bat
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\pip install -r requirements-cuda.txt
 ```
 
 Linux:
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-cuda.txt
 ```
 
-As bibliotecas de CUDA (`cublas`, `cudnn`) vêm dos wheels da NVIDIA listados no `requirements.txt` (`nvidia-cublas-cu12` / `nvidia-cudnn-cu12`). No Windows o `app.py` registra `site-packages\nvidia\*\bin` via `os.add_dll_directory()` e prefixa o `PATH`. No Linux pré-carrega os `.so` em `nvidia/*/lib` (e `lib64`) — sem isso a transcrição falha com DLL/`.so` de cublas ausente. Se você instalar as dependências fora de um venv na raiz do projeto, garanta que esses pacotes estejam visíveis no ambiente usado para rodar.
+As bibliotecas de CUDA (`cublas`, `cudnn`) vêm dos wheels da NVIDIA listados no `requirements-cuda.txt` (`nvidia-cublas-cu12` / `nvidia-cudnn-cu12`). No Windows o `app.py` registra `site-packages\nvidia\*\bin` via `os.add_dll_directory()` e prefixa o `PATH`. No Linux pré-carrega os `.so` em `nvidia/*/lib` (e `lib64`) — sem isso a transcrição falha com DLL/`.so` de cublas ausente. Se você instalar as dependências fora de um venv na raiz do projeto, garanta que esses pacotes estejam visíveis no ambiente usado para rodar.
 
 ## Fontes no Linux: use o Python do sistema
 
@@ -80,7 +82,29 @@ source .venv/bin/activate
 python app.py
 ```
 
-Na primeira execução o modelo `large-v3` é baixado pelo faster-whisper e depois carregado na GPU (há um aquecimento de uma inferência vazia antes de liberar o botão GRAVAR).
+Na primeira execução o modelo escolhido é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. Em **Automático**, o Sussurro escolhe Turbo se detectar CUDA e Base se usar CPU.
+
+## Escolha do modelo
+
+No card de configuração, escolha **MODELO** e **EXECUTAR EM** e clique em **Aplicar modelo**. A troca acontece sem reiniciar e só é aceita fora de um ditado ou transcrição em andamento. O cabeçalho e `python app.py status` mostram o modelo e dispositivo ativos. A preferência só é salva depois que o modelo carrega; se a troca falhar, o app tenta recuperar o anterior pelo cache.
+
+| Seu PC / prioridade | Ponto de partida recomendado | Execução |
+| --- | --- | --- |
+| PC fraco, CPU antigo | **Base**; Tiny se Base ainda ficar lento | CPU, INT8 |
+| Sem GPU dedicada, CPU recente | **Small**; Base para menor espera | CPU, INT8 |
+| Intermediário, como RTX 3060 | **Turbo** | CUDA, INT8/FP16 |
+| Forte, como RTX 4070 Ti Super | **Turbo** | CUDA, INT8/FP16 |
+| Fortíssimo, como RTX 4090 | **Turbo** para ditado; Large-v3 para priorizar precisão | CUDA, INT8/FP16 |
+
+O seletor oferece **Tiny, Base, Small, Medium, Turbo e Large-v3**, todos multilíngues. Medium é uma opção intermediária para comparação; Turbo é a recomendação geral em GPU. Uma placa mais forte não torna necessário escolher um modelo maior. A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas gravações. Os perfis acima são recomendações, não benchmarks dessas placas, e não garantem ditado em tempo real em CPU.
+
+O Turbo reduz o decodificador do large-v3 de 32 para 4 camadas, com uma pequena perda de qualidade reportada pelos autores. INT8 reduz a precisão numérica para economizar memória. Fontes: [modelo oficial Turbo](https://huggingface.co/openai/whisper-large-v3-turbo) e [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Não incluímos modelos `.en` ou `distil-large-v3`, que são voltados ao inglês, na seleção para ditado em português.
+
+### Atualizar de uma versão antiga
+
+Feche o Sussurro, atualize o código (`git pull --ff-only`, em um checkout sem alterações pendentes), atualize as dependências e abra novamente. Se baixou um ZIP, extraia a nova versão e preserve `settings.json`, `library.json` e `history/` da instalação anterior.
+
+Instalações anteriores à v0.4.0 não tinham escolha de modelo: ao atualizar, recebem **Automático → Turbo na GPU / Base na CPU**. Histórico, biblioteca e demais preferências são preservados. Escolhas de modelo feitas a partir desta versão persistem nas próximas atualizações. Não há atualizador automático: é necessário instalar a nova versão.
 
 ## Como usar
 
@@ -104,7 +128,7 @@ O comando `sussurro toggle` usa um cliente leve de socket, sem importar Tk, áud
 
 A cópia via `wl-copy`/`xclip` não captura os pipes dos processos que ficam servindo o clipboard. Capturá-los provocava um timeout de 2 segundos e acionava a digitação de reserva. A restauração do clipboard aguarda 400 ms em segundo plano, respeita cópias feitas pelo usuário durante essa espera e mantém a ordem entre colagens consecutivas.
 
-O modelo continua sendo `large-v3`, CUDA, `float16`, `beam_size=5`. O aquecimento consome o gerador de transcrição e inicializa o VAD antes de liberar a gravação. No modo `final`, os blocos são concatenados uma única vez e o VAD é executado pelo faster-whisper, evitando uma segunda varredura do mesmo áudio.
+O padrão em GPU NVIDIA é `large-v3-turbo`, CUDA, `int8_float16`; em CPU é `base`, `int8`. Se o hardware não suportar essa precisão, é usada uma alternativa suportada. A decodificação usa `beam_size=5`. O aquecimento consome o gerador de transcrição e inicializa o VAD antes de liberar a gravação. No modo `final`, os blocos são concatenados uma única vez e o VAD é executado pelo faster-whisper, evitando uma segunda varredura do mesmo áudio.
 
 - `sussurro status`: informa se o modelo está pronto, se está gravando e se ainda há trabalho pendente.
 - `sussurro-performance.log`: registra duração do áudio, tempo de transcrição, tempo de entrega e tempo desde o comando de parada. Não contém áudio nem texto ditado. Rotação de 1 MB, com duas cópias anteriores.
@@ -130,7 +154,7 @@ Todos estão no `.gitignore`. Nada é enviado para serviço externo: captura, VA
 
 ## Linux — o que ainda é limitado
 
-- Sem GPU NVIDIA o modelo não sobe (igual ao Windows).
+- Aceleração por GPU usa NVIDIA/CUDA. GPUs AMD/Intel usam a opção CPU nesta versão.
 - Wayland: pynput não fornece o atalho global; use o cliente de socket com um atalho do compositor e instale `wtype` para enviar teclas.
 - Overlay da barra: sem chroma-key (`-transparentcolor` é Windows); cantos da janela ficam opacos.
 - Área útil do monitor: a tela Tk inteira, sem recorte por painel/multi-monitor.

@@ -2,7 +2,30 @@
 
 As mudanças de cada versão do Sussurro são registradas aqui. As versões seguem o formato `MAJOR.MINOR.PATCH`.
 
-## Não lançado — 2026-09-09
+## [0.4.0] — 2026-09-15
+
+### Adicionado
+
+- Seletor de modelos multilíngues: Tiny, Base, Small, Medium, Turbo e Large-v3. Escolha CPU, GPU NVIDIA ou Automático e aplique sem reiniciar.
+- Transcrição em CPU, sem exigir GPU dedicada. Instalação leve em `requirements.txt`; suporte NVIDIA em `requirements-cuda.txt`.
+- Guia de modelos para PCs básicos, CPUs modernos e GPUs RTX 3060, 4070 e 4090.
+
+### Melhorado
+
+- Turbo passa a ser o padrão em GPU, com INT8/FP16 quando suportado; Base com INT8 é o padrão em CPU. Instalações antigas recebem esse padrão ao atualizar, preservando preferências e histórico.
+- Troca de modelo bloqueada durante ditados/transcrições. Downloads ocorrem antes de liberar o modelo anterior; falhas tentam recuperá-lo pelo cache, sem carregar dois modelos simultaneamente.
+- Cabeçalho e comando `status` mostram modelo, dispositivo, precisão e estado de carregamento reais.
+- Modelos completos em cache carregam sem consultar a internet; downloads interrompidos são completados no próximo uso.
+- Testes automáticos no GitHub em Python 3.11 e 3.14, usando as dependências de CPU.
+
+### Também incluído desde o release v0.3.0
+
+- Comando `transcribe <arquivo>` para transcrever e arquivar áudio local sem abrir o microfone ou colar texto; formatos como OGG/Opus, MP3 e M4A exigem FFmpeg no PATH.
+- Posicionamento da barra corrigido em monitores com escala fracionária e origem deslocada.
+- Vídeo de demonstração atualizado no site.
+
+### Corrigido
+
 
 - Gravações cuja transcrição falha agora preservam o WAV no histórico. A entrada exibe a falha e permite tentar novamente; quando funciona, o mesmo registro recebe o texto sem duplicar o áudio.
 - Modo colar respeitado no Codex/ChatGPT: removida a exceção que forçava digitação caractere a caractere. Terminais continuam usando Ctrl+Shift+V.

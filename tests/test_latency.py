@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
+from sussurro_models import ModelConfig
 import numpy as np
 
 
@@ -59,7 +60,9 @@ class LatencyTests(unittest.TestCase):
             yield None
         model = SimpleNamespace(model=SimpleNamespace(device='cuda', compute_type='float16'),
                                 transcribe=Mock(return_value=(generate(), None)))
-        with patch.object(app, 'WhisperModel', return_value=model), patch.object(app, 'get_speech_timestamps') as vad:
+        with patch.object(app, 'WhisperModel', return_value=model), patch.object(app, 'get_speech_timestamps') as vad, \
+             patch.object(app, 'download_model', return_value='/cached/model'), \
+             patch.object(app, 'resolve_model_config', return_value=ModelConfig('base', 'cpu', 'int8')):
             t.load_model()
         self.assertEqual(decoded, [True])
         self.assertIs(t.model, model)

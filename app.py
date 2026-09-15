@@ -1,10 +1,10 @@
-"""Sussurro — voice-to-text local: mic -> Silero VAD -> faster-whisper large-v3 (CUDA).
+"""Sussurro — voice-to-text local: mic -> Silero VAD -> faster-whisper (CPU ou CUDA).
 
 HUD Tkinter: gravar/parar, atalho global de mouse (digita onde o cursor estiver),
 fonte de captura (microfone, audio do PC via loopback ou os dois misturados),
 modo de transcricao (simultaneo por trecho ou tudo ao final).
 
-Windows e Linux (X11/Pulse ou PipeWire). CUDA continua obrigatorio.
+Windows e Linux (X11/Pulse ou PipeWire). CPU ou GPU NVIDIA opcional.
 """
 
 import sys
@@ -17,6 +17,7 @@ if __name__ == "__main__" and _cli(sys.argv):
     raise SystemExit(0)
 
 import collections
+import gc
 import ctypes
 import json
 import logging
@@ -107,6 +108,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from faster_whisper.utils import download_model
+from sussurro_models import (MODEL_LABELS, DEVICE_LABELS, DEFAULT_MODEL_SETTINGS,
+                             normalize_model_settings, resolve_model_config, model_path)
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 from pynput import keyboard, mouse
 
@@ -201,6 +205,7 @@ HISTORY_DIR = Path(__file__).with_name("history")
 HISTORY_INDEX = HISTORY_DIR / "history.jsonl"
 HIST_RENDER_MAX = 200  # linhas desenhadas na aba HISTORICO (a memoria guarda tudo)
 DEFAULT_SETTINGS = {
+    **DEFAULT_MODEL_SETTINGS,
     "mouse_button": "x2",       # middle | x1 | x2
     "trigger_mode": "alternar",  # alternar (clique liga/desliga) | segurar (push-to-talk)
     "device_name": None,
@@ -227,6 +232,7 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     if SETTINGS_PATH.exists():
         settings.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+    settings.update(normalize_model_settings(settings))
     settings["devices"] = {**devmod.DEFAULTS, **(settings.get("devices") or {})}
     return settings
 
@@ -849,6 +855,8 @@ class Transcriber:
         self.text_queue = text_queue
         self.status_queue = status_queue
         self.model = None
+        self.model_config = None
+        self.model_loading = threading.Event()
         self.library = Library()
         self.language = "pt"
         self.transcribe_mode = "simultaneo"
@@ -876,6 +884,7 @@ class Transcriber:
         self._session_emitted = False  # ja saiu texto nesta sessao (colar / ao vivo)
         self._session_auto_enter = False  # fone: aperta Enter depois da ultima colagem
         self._session_id = 0          # cancelar/reiniciar invalida o que ficou em voo
+        self._file_jobs = 0
         self._pending = 0             # trechos aceitos e ainda nao entregues
         self._pending_lock = threading.Lock()
         self._drained = True          # todos os trechos foram entregues e arquivados
@@ -890,18 +899,53 @@ class Transcriber:
         threading.Thread(target=self._mixer_loop, daemon=True).start()
 
     # -- modelo -------------------------------------------------------------
-    def load_model(self):
-        self.status_queue.put("Carregando large-v3 na GPU...")
+    def load_model(self, settings=None):
+        """Download first; replace weights under the same lock used by inference."""
+        self.model_loading.set()
+        try:
+            with self._model_lock:
+                with self._pending_lock:
+                    if self._file_jobs or self._pending or self.recording.is_set() or not self._drained or self._retrying.is_set():
+                        raise RuntimeError("Aguarde o trabalho atual terminar antes de trocar o modelo.")
+                config = resolve_model_config(settings or DEFAULT_MODEL_SETTINGS)
+                self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
+                # Network failure leaves the current model usable.
+                path = model_path(config.model, download_model)
+                previous = self.model_config
+                self.model = None
+                self.model_config = None
+                gc.collect()
+                try:
+                    self._load_model_config(config, path)
+                except Exception:
+                    # Do not hold two models in VRAM. Recover from the local cache only.
+                    if previous is not None:
+                        try:
+                            self._load_model_config(previous, download_model(previous.model, local_files_only=True))
+                        except Exception:
+                            self.model = None
+                            self.model_config = None
+                    raise
+        finally:
+            self.model_loading.clear()
+
+    def _load_model_config(self, config, path):
+        self.status_queue.put(f"Carregando {config.label}...")
         t0 = time.perf_counter()
-        model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-        silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
-        segments, _ = model.transcribe(silence, language="pt", beam_size=5)
-        # faster-whisper so executa a inferencia quando o gerador e consumido.
-        collections.deque(segments, maxlen=0)
-        get_speech_timestamps(silence, VAD_OPTIONS)
-        self.model = model  # atalho so liberado depois de aquecer Whisper e VAD
-        _perf("model_ready", device=model.model.device, compute_type=model.model.compute_type,
-              model="large-v3", load_s=round(time.perf_counter() - t0, 3))
+        model = WhisperModel(path, device=config.device, compute_type=config.compute_type)
+        try:
+            silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
+            segments, _ = model.transcribe(silence, language="pt", beam_size=5)
+            collections.deque(segments, maxlen=0)
+            get_speech_timestamps(silence, VAD_OPTIONS)
+        except Exception:
+            # Explicitly free failed weights before attempting to recover the old model.
+            model.model.unload_model()
+            raise
+        self.model = model
+        self.model_config = config
+        _perf("model_ready", device=config.device, compute_type=config.compute_type,
+              model=config.model, load_s=round(time.perf_counter() - t0, 3))
         self.status_queue.put(f"Modelo pronto ({time.perf_counter() - t0:.1f}s). Pode gravar.")
 
     # -- captura ------------------------------------------------------------
@@ -1030,6 +1074,8 @@ class Transcriber:
     def start(self, device_index: int | None, inject: bool,
               capture_mode: str = "microfone", loopback_index: int | None = None,
               auto_enter: bool = False):
+        if self.model_loading.is_set():
+            raise RuntimeError("Aguarde a troca do modelo terminar.")
         if self.recording.is_set():
             return
         if self.busy():
@@ -1093,9 +1139,10 @@ class Transcriber:
         do status, que so chega depois de colar e de arquivar.
         """
         with self._pending_lock:
-            pendentes = self._pending
+            pendentes = self._pending + self._file_jobs
         return (self.recording.is_set() or not self._drained or pendentes > 0
-                or self._retrying.is_set())
+                or self._retrying.is_set() or self.model_loading.is_set()
+                or self._model_lock.locked())
 
     def _pending_done(self):
         with self._pending_lock:
@@ -1275,6 +1322,8 @@ class Transcriber:
         dentro para a inferencia acontecer com o lock ainda tomado.
         """
         with self._model_lock:
+            if self.model_loading.is_set() or self.model is None:
+                raise RuntimeError("Modelo indisponivel ou sendo trocado. Tente novamente quando estiver pronto.")
             segments, info = self.model.transcribe(
                 audio, language=language, beam_size=5, vad_filter=vad_filter,
                 hotwords=self.library.hotwords,
@@ -1287,26 +1336,35 @@ class Transcriber:
         Usado pelo IPC (`sussurro transcribe <arquivo>`), que e como o Hermes manda os
         audios do WhatsApp. Retorna o mesmo dict que vai pro history.jsonl.
         """
-        if self.model is None:
-            raise RuntimeError("modelo ainda nao esta pronto")
-        src = Path(path).expanduser()
-        if not src.is_file():
-            raise FileNotFoundError(str(src))
-        audio = load_audio_16k_mono(src)
-        if audio.size == 0:
-            raise ValueError("audio vazio")
-        t0 = time.perf_counter()
-        lang = None if self.language == "auto" else self.language
-        segments, _info = self._transcribe_locked(audio, language=lang, vad_filter=True)
-        text = format_transcript(segments)
-        text, fixes = self.library.apply(text)
-        if not text:
-            raise ValueError("nenhuma fala reconhecida")
-        entry = self._archive_audio(audio, text, fixes, datetime.now())
-        _perf("file_done", source=src.name, audio_s=round(audio.size / SAMPLE_RATE, 3),
-              inference_ms=round((time.perf_counter() - t0) * 1000, 1))
-        self.status_queue.put(f"Arquivo transcrito ({audio.size / SAMPLE_RATE:.1f}s).")
-        return entry
+        with self._pending_lock:
+            if self.model_loading.is_set():
+                raise RuntimeError("Modelo sendo trocado; aguarde ficar pronto.")
+            self._file_jobs += 1
+        try:
+            if self.model is None:
+                raise RuntimeError("modelo ainda nao esta pronto")
+            src = Path(path).expanduser()
+            if not src.is_file():
+                raise FileNotFoundError(str(src))
+            audio = load_audio_16k_mono(src)
+            if audio.size == 0:
+                raise ValueError("audio vazio")
+            t0 = time.perf_counter()
+            lang = None if self.language == "auto" else self.language
+            segments, _info = self._transcribe_locked(audio, language=lang, vad_filter=True)
+            text = format_transcript(segments)
+            text, fixes = self.library.apply(text)
+            if not text:
+                raise ValueError("nenhuma fala reconhecida")
+            entry = self._archive_audio(audio, text, fixes, datetime.now())
+            _perf("file_done", source=src.name, audio_s=round(audio.size / SAMPLE_RATE, 3),
+                  inference_ms=round((time.perf_counter() - t0) * 1000, 1))
+            self.status_queue.put(f"Arquivo transcrito ({audio.size / SAMPLE_RATE:.1f}s).")
+            return entry
+        finally:
+            with self._pending_lock:
+                self._file_jobs -= 1
+
 
     def _archive_audio(self, audio, text: str, fixes: int, started: datetime, *,
                        failed: bool = False, error: str | None = None) -> dict:
@@ -1932,9 +1990,14 @@ class IpcServer(threading.Thread):
             if self.transcriber is None:
                 return "ok\n"
             t = self.transcriber
-            return json.dumps({"ready": t.model is not None,
+            config = t.model_config
+            return json.dumps({"ready": t.model is not None and not t.model_loading.is_set(),
                                "recording": t.recording.is_set(), "busy": t.busy(),
-                               "model": "large-v3", "device": "cuda", "compute_type": "float16"}) + "\n"
+                               "loading": t.model_loading.is_set(),
+                               "model": config.model if config else None,
+                               "device": config.device if config else None,
+                               "compute_type": config.compute_type if config else None}) + "\n"
+
         return "err unknown\n"
 
     def _handle_transcribe(self, path: str) -> str:
@@ -2491,7 +2554,7 @@ class App:
             photo = tk.PhotoImage(file=str(png))
             root.iconphoto(True, photo)
             root._sussurro_icon = photo
-        root.geometry("720x660")
+        root.geometry(f"760x{min(800, max(600, root.winfo_screenheight() - 80))}")
 
         self.settings = load_settings()
         self.devices = list_input_devices()
@@ -2540,8 +2603,9 @@ class App:
             ctk.CTkLabel(header, image=self._brand_img, text="").pack(side="left")
         ctk.CTkLabel(header, text="SUSSURRO", text_color=INK,
                      font=(self.FONT_DISPLAY, 24)).pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(header, text="large-v3 · CUDA", text_color=INK_3,
-                     font=(self.FONT_MONO, 12)).pack(side="right")
+        self.model_label = ctk.CTkLabel(header, text="Preparando modelo...", text_color=INK_3,
+                                        font=(self.FONT_MONO, 11))
+        self.model_label.pack(side="right")
 
         # faixa de comando: GRAVAR e o unico laranja da janela
         cmd = ctk.CTkFrame(root, fg_color="transparent")
@@ -2631,6 +2695,22 @@ class App:
         ctk.CTkLabel(card, text="", height=14).grid(row=4, column=2,
                                                     padx=14, pady=(10, 0))
 
+        cfg_label("MODELO", 6, 0)
+        cfg_label("EXECUTAR EM", 6, 1)
+        self.model_choice = combo(list(MODEL_LABELS.values()),
+                                  MODEL_LABELS[self.settings["whisper_model"]], lambda _: None, 7, 0)
+        self.device_choice = combo(list(DEVICE_LABELS.values()),
+                                   DEVICE_LABELS[self.settings["whisper_device"]], lambda _: None, 7, 1)
+        self.apply_model_btn = ctk.CTkButton(
+            card, text="Aplicar modelo", command=self._apply_model, height=30,
+            fg_color=SURFACE_2, hover_color=SURFACE_3, text_color=INK,
+            border_width=1, border_color=BORDER_STRONG, font=(self.FONT_UI, 12))
+        self.apply_model_btn.grid(row=7, column=2, sticky="ew", padx=14, pady=(4, 0))
+        ctk.CTkLabel(card, text="CPU basico: Base · CPU moderno: Small · RTX 3060 / 4070 / 4090: Turbo\n"
+                               "Large-v3: opcao para priorizar precisao. Primeiro uso baixa o modelo.",
+                     text_color=INK_3, font=(self.FONT_UI, 11), anchor="w", justify="left").grid(
+            row=8, column=0, columnspan=3, sticky="ew", padx=14, pady=(8, 12))
+
         # abas: acento fica no GRAVAR; aba ativa marca por chapa mais clara
         tabbar = ctk.CTkFrame(root, fg_color="transparent")
         tabbar.pack(fill="x", padx=18, pady=(0, 6))
@@ -2690,7 +2770,7 @@ class App:
         # (CTkButton.configure desenha via canvas create_text -> TkpGetColor).
         # No Windows isso "funcionava"; aqui tudo que mexe na HUD passa por esta fila.
         self._ui_queue: queue.Queue = queue.Queue()
-        threading.Thread(target=self._load_model, daemon=True).start()
+        self._begin_model_load(dict(self.settings), persist=False)
         root.after(UI_POLL_MS, self._poll)
 
     # -- abas / historico ----------------------------------------------------
@@ -3211,7 +3291,7 @@ class App:
         return self.loopback_devices[name]
 
     def _start(self, inject: bool, auto_enter: bool = False):
-        if self.transcriber.model is None:
+        if self.transcriber.model is None or self.transcriber.model_loading.is_set():
             self.status.configure(text="Modelo ainda carregando — aguarde.")
             return False
         try:
@@ -3269,13 +3349,52 @@ class App:
         """Agenda chamada de widget para a thread do Tk. Nao usar Tk daqui de outra thread."""
         self._ui_queue.put((fn, args, kwargs))
 
-    def _load_model(self):
+    def _apply_model(self):
+        if self.transcriber.busy():
+            self.status.configure(text="Aguarde o ditado ou arquivo atual terminar antes de trocar o modelo.")
+            return
+        selection = {
+            "whisper_model": next(k for k, v in MODEL_LABELS.items() if v == self.model_choice.get()),
+            "whisper_device": next(k for k, v in DEVICE_LABELS.items() if v == self.device_choice.get()),
+        }
+        self._begin_model_load(selection, persist=True)
+
+    def _begin_model_load(self, selection, *, persist):
+        # Set the gate on Tk's thread before launching work: queued hotkeys cannot race it.
+        self.transcriber.model_loading.set()
+        self.record_btn.configure(state="disabled")
+        self.apply_model_btn.configure(state="disabled")
+        self.model_choice.configure(state="disabled")
+        self.device_choice.configure(state="disabled")
+        self.model_label.configure(text="Preparando modelo...")
+        threading.Thread(target=self._load_model, args=(selection, persist), daemon=True).start()
+
+    def _load_model(self, selection, persist):
+        error = None
         try:
-            self.transcriber.load_model()
-            self._ui(self.record_btn.configure, state="normal")
+            self.transcriber.load_model(selection)
         except Exception as e:
             traceback.print_exc()
-            self.status_queue.put(f"ERRO ao carregar modelo: {e}")
+            error = str(e)
+        self._ui(self._model_load_done, selection, persist, error)
+
+    def _model_load_done(self, selection, persist, error):
+        config = self.transcriber.model_config
+        ready = self.transcriber.model is not None
+        if error is None and persist:
+            self.settings.update(normalize_model_settings(selection))
+            try:
+                self._save()
+            except OSError as e:
+                self.status_queue.put(f"Modelo ativo, mas nao foi possivel salvar a preferencia: {e}")
+        self.model_label.configure(text=config.label if config else "Modelo indisponivel")
+        self.record_btn.configure(state="normal" if ready else "disabled")
+        self.apply_model_btn.configure(state="normal")
+        self.model_choice.configure(state="readonly")
+        self.device_choice.configure(state="readonly")
+        if error:
+            self.status_queue.put("ERRO ao carregar: " + error +
+                                  (" — modelo anterior mantido." if ready else " — escolha modelo menor ou CPU e aplique."))
 
     def _poll(self):
         try:
