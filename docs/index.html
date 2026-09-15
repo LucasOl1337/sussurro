@@ -137,7 +137,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
           <source src="media/sussurro-promo.mp4" type="video/mp4">
         </video>
       </div>
-      <p class="vcap">Narração: Lucas Oliveira — OFICIAL #1 · MCHOSE HQ · <a href="#elon">versão com a voz do Elon Musk</a></p>
+      <p class="vcap">Narração: Lucas Oliveira, voz oficial · <a href="#elon">versão com a voz do Elon Musk</a></p>
     </div>
   </header>
 
@@ -209,11 +209,12 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
     </div>
 
     <div class="nums">
-      <div class="num reveal"><b>~1,2 s</b><span>do fim da fala ao texto colado, num trecho de 30 s (RTX 4070 Ti Super)</span></div>
+      <div class="num reveal"><b>0,3 s</b><span>pra transcrever 4,8 s de fala nesta gravação (RTX 4070 Ti Super, 15/09/2026)</span></div>
       <div class="num reveal"><b>0</b><span>bytes de áudio enviados pra fora da sua máquina</span></div>
       <div class="num reveal"><b>large-v3</b><span>o maior modelo Whisper, em float16 na sua GPU</span></div>
       <div class="num reveal"><b>MIT</b><span>licença. Use, modifique, redistribua</span></div>
     </div>
+    <p class="foot-note">0,3 s é o tempo de inferência do trecho de 4,8 s gravado nesta demo, lido do <code>sussurro-performance.log</code> (evento <code>segment_done</code>, 15/09/2026). Num trecho de 30 s, a medição publicada no <a href="https://github.com/LucasOl1337/sussurro/blob/main/CHANGELOG.md">changelog 0.2.0</a> foi ~1,2 s do fim da fala ao texto colado, na mesma GPU. Zero bytes fora da máquina: captura, VAD e Whisper rodam no processo local; não há cliente de rede no caminho do áudio.</p>
   </section>
 
   <section id="omarchy">
@@ -236,7 +237,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
       <thead><tr><th></th><th>Sussurro</th><th>Wispr Flow</th></tr></thead>
       <tbody>
         <tr><td>Onde o áudio é processado</td><td class="y">Na sua GPU. Funciona sem internet.</td><td class="n">Na nuvem. Precisa de internet.</td></tr>
-        <tr><td>Preço</td><td class="y">Grátis, sem limite de palavras</td><td class="n">Grátis até 2.000 palavras/semana; Pro US$ 15/mês (US$ 12 no anual)</td></tr>
+        <tr><td>Preço</td><td class="y">Grátis, sem limite de palavras</td><td class="n">Grátis até 2.000 palavras/semana no desktop; Pro US$ 15/mês (US$ 12 no anual)</td></tr>
         <tr><td>Código</td><td class="y">Aberto (MIT)</td><td class="n">Fechado</td></tr>
         <tr><td>Sistemas</td><td class="y">Windows e Linux</td><td class="n">Mac, Windows, iPhone e Android. Sem Linux.</td></tr>
         <tr><td>Conta e login</td><td class="y">Não tem</td><td class="n">Obrigatórios</td></tr>
@@ -246,7 +247,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
         <tr><td>Requisito</td><td class="n">GPU NVIDIA</td><td class="y">Qualquer máquina</td></tr>
       </tbody>
     </table>
-    <p class="foot-note">Dados do Wispr Flow conforme a página de preços e a documentação pública em setembro de 2026. Se algo mudou, <a href="https://github.com/LucasOl1337/sussurro/issues">abra um issue</a>.</p>
+    <p class="foot-note">Wispr Flow: preços e limite de 2.000 palavras/semana no desktop lidos em <a href="https://wisprflow.ai/pricing">wisprflow.ai/pricing</a> em 15 de setembro de 2026 (Free US$ 0; Pro US$ 15/mês ou US$ 12/mês no anual; plataformas Mac, Windows, iOS e Android; sem Linux). Sussurro: MIT em <a href="https://github.com/LucasOl1337/sussurro/blob/main/LICENSE">LICENSE</a>; GPU NVIDIA obrigatória no <a href="https://github.com/LucasOl1337/sussurro/blob/main/README.md">README</a>. Se o Wispr mudou, <a href="https://github.com/LucasOl1337/sussurro/issues">abra um issue</a>.</p>
   </section>
 
   <section id="instalar">

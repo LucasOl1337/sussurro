@@ -2844,7 +2844,8 @@ class App:
             ("PALAVRAS DITADAS", fmt_int(st["palavras"]),
              f"maior: {fmt_int(st['maior_ditado'])} palavras"),
             ("PALAVRAS POR MINUTO", fmt_int(st["ppm"]),
-             f"melhor: {fmt_int(st['melhor_ppm'])} ppm"),
+             f"melhor: {fmt_int(st['melhor_ppm'])} ppm" if st["melhor_ppm"]
+             else f"recorde em trechos de {int(MIN_DUR_PPM)} s+"),
             ("SEQUENCIA", fmt_dias(st["streak"]), f"recorde: {fmt_dias(st['recorde'])}"),
             ("TEMPO FALADO", fmt_dur(st["segundos"]),
              f"{fmt_int(st['ditados'])} ditados, media de {fmt_dur(media)}"),
