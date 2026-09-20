@@ -2,6 +2,20 @@
 
 As mudanças de cada versão do Sussurro são registradas aqui. As versões seguem o formato `MAJOR.MINOR.PATCH`.
 
+## [0.5.0] — 2026-09-19
+
+- Integração com Hyprland Lua: foco usa `hl.dsp.focus`, e posicionamento da barra lê o resultado com `hyprctl repl`. Uma posição já aplicada volta a ser reconhecida, evitando comandos repetidos durante a gravação.
+- No Hyprland, falhas de uinput ou clipboard interrompem a colagem/Enter com mensagem explícita, sem recorrer silenciosamente ao teclado virtual de `wtype`.
+- Seleção do destino do ditado considera apenas o workspace visível no monitor e preserva a prioridade da janela focada (índice zero). Janelas de workspaces inativos não recebem mais o foco por sobreposição de coordenadas.
+- Colagem confirma o foco antes de prosseguir, preserva Ctrl+Shift+V no fallback de terminais X11 e informa falha quando não há injeção Wayland disponível. Falhas de entrega impedem o Enter automático.
+- Clipboard do Linux mantém o último ditado até outra cópia explícita: removida a restauração por temporizador que podia devolver uma imagem antiga antes de o terminal ler o texto. O log registra classe do destino e atalho enviado, sem conteúdo ditado.
+- Colagem no Linux: o ditado foca a janela sob o mouse (e o campo, em Chromium/web) antes do Ctrl+V. No multi-monitor o teclado ficava numa tela e o ponteiro noutra, então o resultado às vezes não caía no campo selecionado.
+- Aba COMPARAR: grave uma frase uma vez e veja o texto e os tempos de Tiny, Base, Small, Medium, Turbo e Large-v3.
+- Execução individual ou paralela com até dois modelos; o mesmo áudio pode ser reutilizado sem nova gravação.
+- Tempos separados de transcrição, carga/aquecimento, preparo/download e espera total. Cancelamento encerra os processos de teste; falhas ficam isoladas por modelo.
+- Comparação em CPU ou NVIDIA, com idioma selecionável e importação de WAV de até 30 segundos. Sem colar texto, aplicar a Biblioteca ou alterar o histórico de ditados.
+- O WAV temporário da comparação usa o cache privado do Sussurro, em vez do `/tmp` compartilhado, evitando falhas quando a cota temporária do sistema está cheia.
+
 ## [0.4.0] — 2026-09-15
 
 ### Adicionado
@@ -13,6 +27,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 ### Melhorado
 
 - Turbo passa a ser o padrão em GPU, com INT8/FP16 quando suportado; Base com INT8 é o padrão em CPU. Instalações antigas recebem esse padrão ao atualizar, preservando preferências e histórico.
+- O seletor de execução agora mostra os nomes reais da GPU NVIDIA e da CPU. GPUs AMD também são detectadas e explicadas sem oferecer um alvo inválido: a instalação CUDA não mistura nem soma o backend ROCm/HIP.
+- O seletor de microfone deixou de expor sozinho nomes opacos como `pipewire`, `pulse` e `default`: mostra o aparelho atual, distingue rota do sistema de acesso direto e explica em linguagem comum o que cada entrada faz, preservando o identificador técnico nas preferências.
 - Troca de modelo bloqueada durante ditados/transcrições. Downloads ocorrem antes de liberar o modelo anterior; falhas tentam recuperá-lo pelo cache, sem carregar dois modelos simultaneamente.
 - Cabeçalho e comando `status` mostram modelo, dispositivo, precisão e estado de carregamento reais.
 - Modelos completos em cache carregam sem consultar a internet; downloads interrompidos são completados no próximo uso.

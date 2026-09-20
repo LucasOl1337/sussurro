@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 _MON_TTL = 3.0  # s: cache da lista de monitores
+_SKIP_PASTE_CLASSES = frozenset({"SussurroBar"})
 
 
 def _socket_path() -> Path | None:
@@ -40,6 +41,8 @@ class Hypr:
     def __init__(self):
         self.sock = _socket_path()
         self.available = self.sock is not None
+        if self.sock is not None and not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = self.sock.parent.name
         self._mons = []
         self._native_mons = []
         self._placement = None
@@ -134,6 +137,105 @@ class Hypr:
         win = self._query("activewindow")
         return win if isinstance(win, dict) and win.get("class") else None
 
+    def native_cursorpos(self):
+        """Cursor nas coordenadas do compositor (as mesmas de `clients`)."""
+        pos = self._query("cursorpos")
+        if isinstance(pos, dict) and "x" in pos:
+            return int(pos["x"]), int(pos["y"])
+        return None
+
+    def window_at(self, x: int, y: int):
+        """Janela no ponto (x, y) do compositor, ignorando a barra do Sussurro.
+
+        Prefere janela flutuante, depois a menor area (widget/modal por cima do
+        tile), depois a mais recentemente focada. Sem isso o Ctrl+V do wtype
+        cai na janela com foco de teclado, que no multi-monitor costuma ser
+        outra tela — e o ditado 'as vezes cola, as vezes nao'.
+        """
+        clients = self._query("clients")
+        if not isinstance(clients, list):
+            return None
+        # `mapped`/`hidden` do not say whether a workspace is on screen:
+        # inactive workspaces retain their windows' monitor coordinates.
+        monitors = self._query("monitors")
+        if not isinstance(monitors, list):
+            return None
+        monitor = next((m for m in monitors
+                        if m["x"] <= x < m["x"] + m["width"] / m.get("scale", 1)
+                        and m["y"] <= y < m["y"] + m["height"] / m.get("scale", 1)), None)
+        if monitor is None:
+            return None
+        special = (monitor.get("specialWorkspace") or {}).get("id", 0)
+        visible_workspace = special or (monitor.get("activeWorkspace") or {}).get("id")
+        hits = []
+        for client in clients:
+            if not client.get("mapped") or client.get("hidden"):
+                continue
+            if ((client.get("workspace") or {}).get("id") != visible_workspace
+                    and not client.get("pinned")):
+                continue
+            cls = (client.get("class") or client.get("initialClass") or "")
+            if cls in _SKIP_PASTE_CLASSES:
+                continue
+            at = client.get("at") or [0, 0]
+            size = client.get("size") or [0, 0]
+            if len(at) < 2 or len(size) < 2:
+                continue
+            x0, y0 = int(at[0]), int(at[1])
+            width, height = int(size[0]), int(size[1])
+            if width <= 0 or height <= 0:
+                continue
+            if x0 <= x < x0 + width and y0 <= y < y0 + height:
+                hits.append((
+                    0 if client.get("floating") else 1,
+                    width * height,
+                    int(client["focusHistoryID"] if client.get("focusHistoryID") is not None else 10**6),
+                    client,
+                ))
+        if not hits:
+            return None
+        hits.sort(key=lambda item: (item[0], item[1], item[2]))
+        return hits[0][3]
+
+    def focus_window(self, win) -> bool:
+        if not win:
+            return False
+        addr = win.get("address") if isinstance(win, dict) else str(win)
+        if not addr:
+            return False
+        target = addr if addr.startswith("address:") else f"address:{addr}"
+        code = 'return hl.dispatch(hl.dsp.focus({window=' + json.dumps(target) + '})).ok'
+        env = os.environ
+        try:
+            result = subprocess.run(
+                ["hyprctl", "repl", code],
+                capture_output=True, text=True, timeout=1, env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == "true"
+
+    def focus_at_cursor(self):
+        """Foca a janela sob o ponteiro. Devolve o dict da janela, ou None."""
+        pos = self.native_cursorpos()
+        if not pos:
+            return None
+        win = self.window_at(*pos)
+        if not win:
+            return None
+        active = self.activewindow()
+        if not active or active.get("address") != win.get("address"):
+            if not self.focus_window(win):
+                raise RuntimeError("Nao foi possivel focar o destino do ditado; texto preservado no historico.")
+            for _ in range(10):
+                active = self.activewindow()
+                if active and active.get("address") == win.get("address"):
+                    break
+                time.sleep(0.01)
+            else:
+                raise RuntimeError("O foco mudou antes da colagem; texto preservado no historico.")
+        return win
+
     def place_bar(self, x: int, y: int) -> bool:
         target = self.monitor_at(x, y)
         if target is None:
@@ -152,7 +254,7 @@ class Hypr:
                 f'local placed=hl.dispatch(hl.dsp.window.move({{window=w,x={gx},y={gy},relative=false}})); '
                 'return moved.ok and placed.ok end end; return false')
         try:
-            result = subprocess.run(["hyprctl", "eval", code], capture_output=True,
+            result = subprocess.run(["hyprctl", "repl", code], capture_output=True,
                                     text=True, timeout=1)
         except (OSError, subprocess.TimeoutExpired):
             return False

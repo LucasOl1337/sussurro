@@ -2,7 +2,7 @@
 
 Ditado local para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Tudo roda na sua máquina — nenhum áudio sai do computador.
 
-[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.4.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.4.0) · [Changelog](CHANGELOG.md)
+[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.5.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.5.0) · [Changelog](CHANGELOG.md)
 
 O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper **Turbo na GPU ou Base na CPU**, com modelo selecionável**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 
@@ -82,7 +82,7 @@ source .venv/bin/activate
 python app.py
 ```
 
-Na primeira execução o modelo escolhido é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. Em **Automático**, o Sussurro escolhe Turbo se detectar CUDA e Base se usar CPU.
+Na primeira execução o modelo escolhido é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. Em **Automático**, o Sussurro escolhe Turbo se detectar CUDA e Base se usar CPU. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
 
 ## Escolha do modelo
 
@@ -98,7 +98,23 @@ No card de configuração, escolha **MODELO** e **EXECUTAR EM** e clique em **Ap
 
 O seletor oferece **Tiny, Base, Small, Medium, Turbo e Large-v3**, todos multilíngues. Medium é uma opção intermediária para comparação; Turbo é a recomendação geral em GPU. Uma placa mais forte não torna necessário escolher um modelo maior. A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas gravações. Os perfis acima são recomendações, não benchmarks dessas placas, e não garantem ditado em tempo real em CPU.
 
+Se houver uma GPU AMD junto da NVIDIA, o Sussurro a identifica e explica seu estado abaixo do seletor, mas não oferece um botão AMD que falharia. O pacote Python normal do CTranslate2 usa CUDA; AMD requer uma compilação ROCm/HIP separada. Os dois backends não se somam para acelerar um único ditado, e manter a AMD livre evita disputar memória compartilhada quando ela é integrada ao processador.
+
 O Turbo reduz o decodificador do large-v3 de 32 para 4 camadas, com uma pequena perda de qualidade reportada pelos autores. INT8 reduz a precisão numérica para economizar memória. Fontes: [modelo oficial Turbo](https://huggingface.co/openai/whisper-large-v3-turbo) e [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Não incluímos modelos `.en` ou `distil-large-v3`, que são voltados ao inglês, na seleção para ditado em português.
+
+## Comparar a mesma frase entre modelos
+
+Abra a aba **COMPARAR**, selecione os modelos e clique em **Gravar frase**. Fale uma vez e clique em **Parar e comparar**. O áudio do microfone selecionado é limitado a 30 segundos e reutilizado em todos os modelos. Você também pode carregar um WAV PCM de 16 bits, mono ou estéreo, de até 30 segundos.
+
+- **Paralelo (2 por vez):** até dois modelos executam ao mesmo tempo. Eles dividem os recursos; os tempos refletem essa disputa.
+- **Individual (1 por vez):** um modelo termina antes de começar o seguinte, facilitando a comparação de velocidade.
+- **Por modelo:** texto reconhecido, dispositivo/precisão, tempo de transcrição após aquecimento, carga/aquecimento, preparo/download e espera total desde o início da comparação (incluindo fila).
+- **Comparar novamente:** reutiliza a mesma frase com outra seleção de modelos, dispositivo ou modo, sem gravar de novo.
+- **Cancelar:** encerra os processos da comparação e libera seus modelos. A falha de um modelo aparece na própria linha e não impede os demais de terminar.
+
+Todos recebem exatamente o mesmo WAV, idioma e `beam_size=5`, sem substituições da Biblioteca, para expor as diferenças de reconhecimento. O primeiro uso baixa os pesos. A comparação usa processos separados e mantém o modelo normal de ditado intacto; enquanto grava/compara, o ditado, a troca de modelo e a transcrição de arquivos do app ficam bloqueados para evitar interferência. Outros aplicativos ainda podem disputar CPU/GPU. Se faltar VRAM, tente Individual, menos modelos ou CPU.
+
+O áudio de comparação fica apenas na memória e em um WAV temporário sob `~/.cache/sussurro/compare`, removido ao terminar/cancelar; ele não depende da cota do `/tmp` compartilhado. Os testes não entram no histórico de ditados. Resultados ficam na aba enquanto o app estiver aberto. O comparador não calcula uma nota de precisão: leia as transcrições e compare com a frase que você falou.
 
 ### Atualizar de uma versão antiga
 
@@ -110,12 +126,12 @@ Instalações anteriores à v0.4.0 não tinham escolha de modelo: ao atualizar, 
 
 - **Atalho global de mouse** — o botão configurado (padrão: lateral 2 / "frente") liga e desliga a gravação em qualquer aplicativo. No Windows o clique é suprimido, então não vira "voltar/avançar" no browser. No Linux o clique também chega ao aplicativo debaixo (pynput não suprime o evento). Em `Setar` você clica o botão desejado (meio, lateral 1 ou lateral 2) para redefinir.
 - **Ação** — `alternar` (clique liga/desliga) ou `segurar` (push-to-talk).
-- **Microfone** — seletor com as entradas do host nativo (WASAPI no Windows; Pulse/ALSA no Linux).
+- **Microfone** — seletor com nomes legíveis e uma explicação da entrada selecionada. `… — padrão do sistema (PipeWire)` acompanha automaticamente o microfone escolhido no sistema; `USB direto` abre aquele aparelho sem acompanhar trocas; PulseAudio, ALSA e JACK aparecem identificados como rotas de compatibilidade ou de áudio profissional. O identificador técnico continua salvo internamente para não quebrar preferências antigas.
 - **Fonte** — `microfone` (entrada), `audio do PC` (o que está saindo nas caixas/fones: loopback WASAPI no Windows, monitor Pulse/PipeWire no Linux) ou `os dois` (mistura mic + PC antes do VAD/whisper).
 - **Canal do PC** — qual saída/monitor capturar no modo `audio do PC` / `os dois`. `padrao do sistema` usa o dispositivo de reprodução atual. O combo fica desabilitado quando a fonte é só microfone.
 - **Transcrição** — `simultaneo`: trechos vão aparecendo conforme você pausa entre frases (corte por VAD após ~0,7 s de silêncio); `final`: acumula tudo e transcreve de uma vez ao parar.
 - **Formatação** — depois do whisper, o texto ganha ponto em cláusula nova e quebra de parágrafo em pausa longa (~1,5 s, não na respiração de 0,7 s) e uma linha nova antes de âncoras faladas (`Pergunta 7`, `Questão 12`, `Primeiro`/`Segundo`/`Terceiro`). Não reescreve nem tira “né/sabe”. Vale no colar, no histórico e no copiar. Ditados antigos ficam como estão.
-- **Envio** — `colar`: cola via Ctrl+V no campo onde o cursor estiver. No Windows o clipboard original é preservado em todos os formatos; no Linux o backup é só texto (`wl-copy`/`xclip`/`xsel`). `digitar`: simula teclado.
+- **Envio** — `colar`: no Linux, foca a janela (e o campo web) sob o mouse e cola via Ctrl+V. No Windows cola via Ctrl+V no campo onde o cursor estiver. No Windows o clipboard original é preservado em todos os formatos; no Linux o backup é só texto (`wl-copy`/`xclip`/`xsel`). `digitar`: simula teclado.
 - **Idioma** — `pt`, `en` ou `auto`.
 - **Bolinha** — overlay sempre no topo, sem roubar foco e fora do Alt-Tab; laranja = gravando, invertida = transcrevendo. Arraste para reposicionar (a posição é salva como fração da área útil do monitor).
 - **Histórico / Ao vivo** — aba com as sessões passadas (tocar o WAV ou copiar o texto) e aba com o texto da sessão atual ("Copiar tudo" leva tudo pra área de transferência). Se o Whisper falhar, o WAV continua no histórico com um aviso; clique na entrada ou no botão ↻ para tentar transcrevê-lo novamente.
@@ -154,7 +170,7 @@ Todos estão no `.gitignore`. Nada é enviado para serviço externo: captura, VA
 
 ## Linux — o que ainda é limitado
 
-- Aceleração por GPU usa NVIDIA/CUDA. GPUs AMD/Intel usam a opção CPU nesta versão.
+- A instalação padrão acelera na GPU NVIDIA/CUDA. CTranslate2 também pode ser compilado separadamente com ROCm/HIP, mas essa build não convive com a build CUDA no processo atual; por isso uma AMD detectada é informada, não oferecida como opção falsa. GPUs AMD/Intel usam CPU nesta instalação.
 - Wayland: pynput não fornece o atalho global; use o cliente de socket com um atalho do compositor e instale `wtype` para enviar teclas.
 - Overlay da barra: sem chroma-key (`-transparentcolor` é Windows); cantos da janela ficam opacos.
 - Área útil do monitor: a tela Tk inteira, sem recorte por painel/multi-monitor.

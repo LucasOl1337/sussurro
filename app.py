@@ -51,54 +51,7 @@ if sys.stdout is None or sys.stderr is None:
     sys.stderr = sys.stderr or _log
 
 
-def _prepare_cuda_libs():
-    """Expõe cublas/cudnn do wheel NVIDIA ao carregador nativo (DLL no Windows, .so no Linux)."""
-    dirs = []
-    for name in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
-        try:
-            mod = __import__(name, fromlist=["*"])
-        except ImportError:
-            continue
-        if getattr(mod, "__file__", None):
-            root = Path(mod.__file__).resolve().parent
-        elif getattr(mod, "__path__", None):
-            root = Path(next(iter(mod.__path__))).resolve()
-        else:
-            continue
-        for sub in ("bin", "lib", "lib64"):
-            d = root / sub
-            if d.is_dir():
-                dirs.append(d)
-    if not dirs:
-        nvidia = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
-        if not nvidia.is_dir():
-            nvidia = (
-                Path(sys.prefix) / "lib"
-                / f"python{sys.version_info.major}.{sys.version_info.minor}"
-                / "site-packages" / "nvidia"
-            )
-        for pkg in ("cublas", "cudnn", "cuda_nvrtc"):
-            for sub in ("bin", "lib", "lib64"):
-                d = nvidia / pkg / sub
-                if d.is_dir():
-                    dirs.append(d)
-    for d in dirs:
-        if IS_WIN:
-            os.add_dll_directory(str(d))
-            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
-            continue
-        os.environ["LD_LIBRARY_PATH"] = str(d) + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
-        pending = [p for p in d.iterdir() if p.is_file() and ".so" in p.name]
-        for _ in range(4):
-            still = []
-            for so in pending:
-                try:
-                    ctypes.CDLL(str(so), mode=ctypes.RTLD_GLOBAL)
-                except OSError:
-                    still.append(so)
-            if len(still) == len(pending):
-                break
-            pending = still
+from sussurro_cuda import _prepare_cuda_libs
 
 
 _prepare_cuda_libs()
@@ -106,10 +59,14 @@ _prepare_cuda_libs()
 import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+from sussurro_compare_ui import ComparisonPanel
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from faster_whisper.utils import download_model
-from sussurro_models import (MODEL_LABELS, DEVICE_LABELS, DEFAULT_MODEL_SETTINGS,
+from sussurro_audio import prepare_input_devices
+from sussurro_hardware import (detect_hardware, execution_device_labels,
+                               execution_hardware_note)
+from sussurro_models import (MODEL_LABELS, DEFAULT_MODEL_SETTINGS,
                              normalize_model_settings, resolve_model_config, model_path)
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 from pynput import keyboard, mouse
@@ -159,8 +116,6 @@ ACCENT = "#f0500a"         # nunca carrega texto claro (grafite por cima: 4,96:1
 ACCENT_HOVER = "#d64708"
 ACCENT_TEXT = "#f07944"    # laranja-como-texto no escuro
 GRAPHITE = "#16181a"       # tinta sobre o laranja
-ROW_EVEN = "#232429"
-ROW_WASH = "#30211e"       # hover de linha (wash laranja escuro)
 
 
 def pick_font(candidates, fallback):
@@ -258,13 +213,18 @@ def _hostapi_index() -> int:
 
 
 def list_input_devices() -> dict:
-    """Nome -> indice das entradas do host nativo (WASAPI / Pulse / ALSA)."""
+    """Nome nativo -> entrada com rotulo humano, sem quebrar preferencias salvas."""
     host = _hostapi_index()
-    return {
-        d["name"]: d["index"]
-        for d in sd.query_devices()
+    devices = [
+        d for d in sd.query_devices()
         if d["max_input_channels"] > 0 and d["hostapi"] == host
-    }
+    ]
+    system_microphone = ""
+    if not IS_WIN:
+        system_microphone = devmod.pretty_source(devmod.default_source())
+        if system_microphone == "—":
+            system_microphone = ""
+    return prepare_input_devices(devices, system_microphone)
 
 
 def list_loopback_devices() -> dict:
@@ -370,6 +330,89 @@ def focused_window_class() -> str | None:
     if not isinstance(win, dict):
         return None
     return win.get("class") or win.get("initialClass")
+
+
+def _ydotool_env() -> dict:
+    env = os.environ.copy()
+    if env.get("YDOTOOL_SOCKET"):
+        return env
+    runtime = Path(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    for name in ("ponte-input.sock", "ydotool.socket", ".ydotool_socket"):
+        sock = runtime / name
+        if sock.exists():
+            env["YDOTOOL_SOCKET"] = str(sock)
+            break
+    return env
+
+
+# Keycodes evdev (linux/input-event-codes.h) usados pelo ydotool.
+_KEY_LEFTCTRL, _KEY_LEFTSHIFT, _KEY_ENTER, _KEY_V = 29, 42, 28, 47
+
+
+def _ydotool_keys(*events: str) -> bool:
+    """Injeta teclas pelo ydotoold (uinput), nao pelo wtype.
+
+    O wtype cria um teclado virtual Wayland com keymap proprio; com o fcitx5
+    no meio, cada evento faz o Hyprland trocar o teclado ativo e reenviar o
+    keymap para todos os clientes (Xwayland recompila via xkbcomp a cada um).
+    Uma colagem virava ~30 broadcasts e travava a sessao. O device uinput do
+    ydotoold usa o mesmo keymap do Hyprland, entao nao ha reenvio.
+    """
+    if IS_WIN or not shutil.which("ydotool"):
+        return False
+    env = _ydotool_env()
+    if not env.get("YDOTOOL_SOCKET"):
+        return False
+    try:
+        r = subprocess.run(
+            ["ydotool", "key", "-d", "12", *events],
+            timeout=2, check=False, capture_output=True, env=env,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def click_at_cursor() -> bool:
+    """Clica no ponteiro para focar o campo (web/GTK) sem mover o mouse.
+
+    No Wayland o wtype manda Ctrl+V para a janela com foco de teclado; em
+    Chromium o campo so recebe a colagem se o input estiver focado. O click
+    usa o ydotoold ja no ar (socket ponte-input). Falha silenciosa se o
+    daemon nao estiver acessivel.
+    """
+    if IS_WIN or not shutil.which("ydotool"):
+        return False
+    try:
+        result = subprocess.run(
+            ["ydotool", "click", "0xC0"],
+            timeout=1, check=False, capture_output=True, env=_ydotool_env(),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def prepare_paste_target():
+    """Garante janela + campo sob o mouse antes do Ctrl+V.
+
+    Devolve a classe da janela alvo para escolher o atalho (terminal vs ctrl_v).
+    """
+    if IS_WIN:
+        return None
+    h = _hypr()
+    if not h.available:
+        return focused_window_class()
+    win = h.focus_at_cursor()
+    time.sleep(0.04)
+    cls = None
+    if isinstance(win, dict):
+        cls = win.get("class") or win.get("initialClass")
+    strategy = paste_strategy(cls or focused_window_class())
+    if strategy == "ctrl_v":
+        click_at_cursor()
+        time.sleep(0.03)
+    return cls or focused_window_class()
 
 
 def monitor_work_area(x: int, y: int):
@@ -857,6 +900,7 @@ class Transcriber:
         self.model = None
         self.model_config = None
         self.model_loading = threading.Event()
+        self.comparing = threading.Event()
         self.library = Library()
         self.language = "pt"
         self.transcribe_mode = "simultaneo"
@@ -892,8 +936,6 @@ class Transcriber:
         self.levels: collections.deque = collections.deque(maxlen=96)
         self._keyboard = keyboard.Controller()
         self._clipboard_lock = threading.RLock()
-        self._clipboard_restore = None
-        self._clipboard_timer = None
         threading.Thread(target=self._segmenter_loop, daemon=True).start()
         threading.Thread(target=self._transcribe_loop, daemon=True).start()
         threading.Thread(target=self._mixer_loop, daemon=True).start()
@@ -905,7 +947,7 @@ class Transcriber:
         try:
             with self._model_lock:
                 with self._pending_lock:
-                    if self._file_jobs or self._pending or self.recording.is_set() or not self._drained or self._retrying.is_set():
+                    if self.comparing.is_set() or self._file_jobs or self._pending or self.recording.is_set() or not self._drained or self._retrying.is_set():
                         raise RuntimeError("Aguarde o trabalho atual terminar antes de trocar o modelo.")
                 config = resolve_model_config(settings or DEFAULT_MODEL_SETTINGS)
                 self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
@@ -1074,6 +1116,8 @@ class Transcriber:
     def start(self, device_index: int | None, inject: bool,
               capture_mode: str = "microfone", loopback_index: int | None = None,
               auto_enter: bool = False):
+        if self.comparing.is_set():
+            raise RuntimeError("Comparacao de modelos em andamento.")
         if self.model_loading.is_set():
             raise RuntimeError("Aguarde a troca do modelo terminar.")
         if self.recording.is_set():
@@ -1142,7 +1186,15 @@ class Transcriber:
             pendentes = self._pending + self._file_jobs
         return (self.recording.is_set() or not self._drained or pendentes > 0
                 or self._retrying.is_set() or self.model_loading.is_set()
-                or self._model_lock.locked())
+                or self._model_lock.locked() or self.comparing.is_set())
+
+    def acquire_comparison(self):
+        with self._pending_lock:
+            if (self.comparing.is_set() or self.recording.is_set() or not self._drained
+                    or self._pending or self._file_jobs or self._retrying.is_set()
+                    or self.model_loading.is_set() or self._model_lock.locked()):
+                raise RuntimeError("Aguarde o ditado, arquivo ou carregamento atual terminar.")
+            self.comparing.set()
 
     def _pending_done(self):
         with self._pending_lock:
@@ -1265,7 +1317,8 @@ class Transcriber:
                 if audio is None:  # fim de sessao: grava no historico
                     try:
                         # o sentinela chega com inject=None: usar o estado da sessao, nao o campo da fila
-                        if self._session_auto_enter and self._session_emitted and self._session_inject:
+                        if (self._session_auto_enter and self._session_emitted
+                                and self._session_inject and not self._session_errors):
                             self._press_enter()
                         self._session_auto_enter = False
                         self._finalize_session()
@@ -1337,8 +1390,8 @@ class Transcriber:
         audios do WhatsApp. Retorna o mesmo dict que vai pro history.jsonl.
         """
         with self._pending_lock:
-            if self.model_loading.is_set():
-                raise RuntimeError("Modelo sendo trocado; aguarde ficar pronto.")
+            if self.model_loading.is_set() or self.comparing.is_set():
+                raise RuntimeError("Modelo sendo trocado ou comparacao em andamento; aguarde.")
             self._file_jobs += 1
         try:
             if self.model is None:
@@ -1476,7 +1529,7 @@ class Transcriber:
             self._retrying.clear()
 
     def _paste(self, text: str):
-        """Cola no app focado preservando o clipboard original (imagens, arquivos etc.)."""
+        """Cola no app focado; no Linux deixa o ditado no clipboard para recolar."""
         if not IS_WIN:
             return self._paste_linux(text)
         backup = backup_clipboard()
@@ -1494,40 +1547,29 @@ class Transcriber:
         time.sleep(0.4)  # o app alvo precisa ler o clipboard antes da restauracao
         restore_clipboard(backup)
 
-    def _restore_linux_clipboard(self, pending):
-        with self._clipboard_lock:
-            if self._clipboard_restore is not pending:
-                return  # timer antigo: outra colagem ja tomou seu lugar
-            backup, pasted, _deadline = pending
-            if backup_clipboard() == pasted:
-                restore_clipboard(backup)  # respeita algo que o usuario copiou depois
-            self._clipboard_restore = None
-
     def _paste_linux(self, text: str):
-        strategy = paste_strategy(focused_window_class())
         with self._clipboard_lock:
-            if self._clipboard_restore is not None:
-                self._clipboard_timer.cancel()
-                # Duas colagens proximas ainda respeitam o tempo de leitura da primeira.
-                time.sleep(max(0, self._clipboard_restore[2] - time.monotonic()))
-                self._restore_linux_clipboard(self._clipboard_restore)
-            backup = backup_clipboard()
+            target_class = prepare_paste_target()
+            strategy = paste_strategy(target_class)
             if not set_clipboard_text(text):
+                if _is_wayland() and _hypr().available:
+                    raise RuntimeError("Falha no clipboard; texto preservado no historico para copiar novamente.")
                 self._type_fallback(text)
                 return
             time.sleep(0.05)
             if not self._send_paste_key(strategy):
-                with self._keyboard.pressed(keyboard.Key.ctrl):
+                if _is_wayland():
+                    raise RuntimeError("Falha ao enviar o atalho de colagem; texto preservado no historico.")
+                modifiers = [keyboard.Key.ctrl]
+                if strategy == "terminal":
+                    modifiers.append(keyboard.Key.shift)
+                with self._keyboard.pressed(*modifiers):
                     self._keyboard.press("v")
                     self._keyboard.release("v")
-            # A espera de 400 ms protege a leitura do clipboard pelo destino,
-            # mas nao precisa bloquear a proxima inferencia ou manter o HUD ocupado.
-            pending = (backup, text.encode("utf-8"), time.monotonic() + 0.4)
-            self._clipboard_restore = pending
-            timer = threading.Timer(0.4, self._restore_linux_clipboard, args=(pending,))
-            timer.daemon = True
-            self._clipboard_timer = timer
-            timer.start()
+            _perf("paste_dispatched", target_class=target_class, strategy=strategy)
+            # Wayland does not acknowledge that the target consumed this paste.
+            # Do not race a slow client by restoring an old image/text on a timer.
+            # Leave this dictation available until the next explicit clipboard write.
 
     def arm_auto_enter(self):
         """Gesto do fone chegou no meio da sessao (ex.: parou por ele): confirma com Enter no fim."""
@@ -1536,6 +1578,10 @@ class Transcriber:
     def _press_enter(self):
         """Modo fone: confirma o envio da frase com Enter depois da ultima colagem."""
         time.sleep(0.15)  # o app alvo precisa processar o Ctrl+V antes do Enter
+        if _ydotool_keys(f"{_KEY_ENTER}:1", f"{_KEY_ENTER}:0"):
+            return
+        if _is_wayland() and _hypr().available:
+            raise RuntimeError("Entrada uinput indisponivel; Enter automatico cancelado.")
         if _is_wayland() and shutil.which("wtype"):
             try:
                 r = subprocess.run(["wtype", "-k", "Return"], timeout=2, check=False, capture_output=True)
@@ -1547,12 +1593,27 @@ class Transcriber:
         self._keyboard.release(keyboard.Key.enter)
 
     def _send_paste_key(self, strategy: str = "ctrl_v") -> bool:
-        """No Wayland o pynput nao injeta tecla no app focado; wtype sim.
+        """Use uinput on Hyprland; wtype remains available on other compositors.
 
         `terminal` usa Ctrl+Shift+V (colar nativo do foot/kitty/ghostty) para o
         Codex TUI nao receber Ctrl+V como colar-imagem.
         """
-        if not _is_wayland() or not shutil.which("wtype"):
+        if not _is_wayland():
+            return False
+        if strategy == "terminal":
+            ok = _ydotool_keys(
+                f"{_KEY_LEFTCTRL}:1", f"{_KEY_LEFTSHIFT}:1", f"{_KEY_V}:1",
+                f"{_KEY_V}:0", f"{_KEY_LEFTSHIFT}:0", f"{_KEY_LEFTCTRL}:0",
+            )
+        else:
+            ok = _ydotool_keys(
+                f"{_KEY_LEFTCTRL}:1", f"{_KEY_V}:1", f"{_KEY_V}:0", f"{_KEY_LEFTCTRL}:0",
+            )
+        if ok:
+            return True
+        if _hypr().available:
+            return False  # wtype's separate keymap can trigger a broadcast storm.
+        if not shutil.which("wtype"):
             return False
         if strategy == "terminal":
             cmd = ["wtype", "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
@@ -1994,6 +2055,7 @@ class IpcServer(threading.Thread):
             return json.dumps({"ready": t.model is not None and not t.model_loading.is_set(),
                                "recording": t.recording.is_set(), "busy": t.busy(),
                                "loading": t.model_loading.is_set(),
+                               "comparing": t.comparing.is_set(),
                                "model": config.model if config else None,
                                "device": config.device if config else None,
                                "compute_type": config.compute_type if config else None}) + "\n"
@@ -2328,6 +2390,9 @@ class HistoryList(ctk.CTkFrame):
     """Historico num canvas so. CTkFrame por linha trava o Tk uns 3s no restore
     (Configure -> _draw em cada canvas); item de canvas pinta na hora."""
 
+    WHEEL_PX = 96        # pixels por clique da roda (uns 2 ditados curtos)
+    SCROLL_FRAME_MS = 12  # ~80 fps na animacao do scroll
+
     def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy, on_retry):
         super().__init__(master, fg_color="transparent", width=1, height=1)
         self.font_mono = font_mono
@@ -2341,17 +2406,20 @@ class HistoryList(ctk.CTkFrame):
         self._hits = []
         self._hover = None
         self._bg_ids = {}
-        self._hover_even = {}
+        self._icon_ids = {}
+        self._content_h = 0
+        self._scroll_target = None
+        self._scroll_job = None
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
         self.canvas = tk.Canvas(self, bg=SURFACE, highlightthickness=0, bd=0,
                                 yscrollincrement=1)
-        self.sb = ctk.CTkScrollbar(self, orientation="vertical", command=self.canvas.yview,
-                                   fg_color="transparent")
+        self.sb = ctk.CTkScrollbar(self, orientation="vertical", command=self._on_scrollbar,
+                                   fg_color="transparent", width=12)
         self.canvas.configure(yscrollcommand=self.sb.set)
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.sb.grid(row=0, column=1, sticky="ns")
+        self.sb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
 
         self.canvas.bind("<Configure>", self._on_cfg)
         self.canvas.bind("<Motion>", self._on_motion)
@@ -2383,24 +2451,65 @@ class HistoryList(ctk.CTkFrame):
         except tk.TclError:
             return False
 
+    # -- scroll ---------------------------------------------------------------
+    def _max_scroll(self) -> int:
+        return max(0, self._content_h - self.canvas.winfo_height())
+
+    def _scroll_pos(self) -> float:
+        return self.canvas.yview()[0] * self._content_h
+
+    def _on_scrollbar(self, *args):
+        # arrasto da barra: pula direto, sem animacao no meio do caminho
+        self._cancel_scroll_anim()
+        self.canvas.yview(*args)
+
+    def _cancel_scroll_anim(self):
+        if self._scroll_job is not None:
+            self.after_cancel(self._scroll_job)
+            self._scroll_job = None
+        self._scroll_target = None
+
     def _on_wheel(self, event):
         if not self._pointer_over_canvas():
             return
-        if self.canvas.yview() == (0.0, 1.0):
+        if self._max_scroll() <= 0:
             return "break"
+        # Tk 9 manda <MouseWheel> com delta em multiplos de 120 no X11/Wayland;
+        # Tk 8 no X11 manda Button-4/5. Touchpad chega com delta fracionado.
         delta = getattr(event, "delta", 0) or 0
         num = getattr(event, "num", 0) or 0
         if num == 4:
-            steps = -3
+            notches = -1.0
         elif num == 5:
-            steps = 3
+            notches = 1.0
         elif delta:
-            steps = -int(delta / 6)
+            notches = -delta / 120.0
         else:
             return "break"
-        self.canvas.yview("scroll", steps, "units")
+        self._scroll_by(notches * self._s(self.WHEEL_PX))
         return "break"
 
+    def _scroll_by(self, px: float):
+        base = self._scroll_pos() if self._scroll_target is None else self._scroll_target
+        self._scroll_target = min(self._max_scroll(), max(0.0, base + px))
+        if self._scroll_job is None:
+            self._scroll_step()
+
+    def _scroll_step(self):
+        self._scroll_job = None
+        if self._scroll_target is None or not self._content_h:
+            return
+        pos = self._scroll_pos()
+        diff = self._scroll_target - pos
+        if abs(diff) < 0.75:
+            self.canvas.yview_moveto(self._scroll_target / self._content_h)
+            self._scroll_target = None
+            return
+        pos += diff * 0.3  # ease-out: fecha 30% da distancia por quadro
+        self.canvas.yview_moveto(pos / self._content_h)
+        self._scroll_job = self.after(self.SCROLL_FRAME_MS, self._scroll_step)
+
+    # -- hit test / hover -------------------------------------------------------
     def _hit(self, x, y):
         for h in self._hits:
             if not (h["y0"] <= y < h["y1"]):
@@ -2417,30 +2526,34 @@ class HistoryList(ctk.CTkFrame):
             return h, "row"
         return None, None
 
+    def _set_hover(self, idx):
+        if idx == self._hover:
+            return
+        if self._hover is not None and self._hover in self._bg_ids:
+            self.canvas.itemconfigure(self._bg_ids[self._hover], fill=SURFACE)
+            failed = self._entries[self._hover].get("failed")
+            for kind, iid in self._icon_ids.get(self._hover, ()):
+                self.canvas.itemconfigure(
+                    iid, fill=ACCENT_TEXT if (failed and kind == "copy") else INK_3)
+        self._hover = idx
+        if idx is not None and idx in self._bg_ids:
+            self.canvas.itemconfigure(self._bg_ids[idx], fill=SURFACE_2)
+            failed = self._entries[idx].get("failed")
+            for kind, iid in self._icon_ids.get(idx, ()):
+                self.canvas.itemconfigure(
+                    iid, fill=ACCENT_TEXT if (failed and kind == "copy") else INK)
+
     def _on_motion(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         h, zone = self._hit(x, y)
         failed = h is not None and self._entries[h["i"]].get("failed")
         clickable = zone in ("play", "copy", "text") or (failed and zone == "row")
         self.canvas.configure(cursor="hand2" if clickable else "")
-        idx = None if h is None else h["i"]
-        if idx == self._hover:
-            return
-        if self._hover is not None and self._hover in self._bg_ids:
-            even = self._hover_even.get(self._hover)
-            self.canvas.itemconfigure(self._bg_ids[self._hover],
-                                      fill=ROW_EVEN if even else SURFACE)
-        self._hover = idx
-        if idx is not None:
-            self.canvas.itemconfigure(self._bg_ids[idx], fill=ROW_WASH)
+        self._set_hover(None if h is None else h["i"])
 
     def _on_leave(self, _event):
         self.canvas.configure(cursor="")
-        if self._hover is not None and self._hover in self._bg_ids:
-            even = self._hover_even.get(self._hover)
-            self.canvas.itemconfigure(self._bg_ids[self._hover],
-                                      fill=ROW_EVEN if even else SURFACE)
-        self._hover = None
+        self._set_hover(None)
 
     def _on_click(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
@@ -2455,54 +2568,54 @@ class HistoryList(ctk.CTkFrame):
         elif zone in ("copy", "text"):
             self.on_copy(entry["text"])
 
+    # -- desenho --------------------------------------------------------------
     def _redraw(self):
         frac = self.canvas.yview()[0]
+        self._cancel_scroll_anim()
         self.canvas.delete("all")
         self._hits = []
         self._bg_ids = {}
-        self._hover_even = {}
+        self._icon_ids = {}
         self._hover = None
         w = self._width
         if w < 40:
             return
         s = self._s
-        padx, pady = s(8), s(7)
-        btn, gap = s(30), s(4)
-        btns_w = btn * 2 + gap + padx
-        y = s(4)
+        padx, pady = s(14), s(9)
+        btn, gap = s(28), s(2)
+        btns_w = btn * 2 + gap + padx + s(6)
+        y = s(6)
         prev_day = None
-        day_i = 0
         font_day = (self.font_ui, 10, "bold")
-        font_time = (self.font_mono, 12)
+        font_time = (self.font_mono, 11)
         # largura da hora medida na fonte real: com Xft a mono e mais larga que os 44 px fixos
-        time_w = max(s(44), tkfont.Font(font=font_time).measure("00:00") + s(8))
-        font_text = (self.font_ui, 12)
+        time_w = tkfont.Font(font=font_time).measure("00:00") + s(12)
+        font_text = (self.font_ui, 13)
         font_btn = (self.font_ui, 12)
         if not self._entries:
-            self.canvas.create_text(padx, y + s(6), text="Nenhum ditado ainda.",
+            self.canvas.create_text(padx, y + s(8), text="Nenhum ditado ainda.",
                                     fill=INK_3, anchor="nw", font=font_text)
-            self.canvas.configure(scrollregion=(0, 0, w, y + s(40)))
+            self._content_h = y + s(40)
+            self.canvas.configure(scrollregion=(0, 0, w, self._content_h))
             return
         for i, entry in enumerate(self._entries):
             dt = datetime.fromisoformat(entry["ts"])
             day = self.day_label(dt)
             if day != prev_day:
-                hid = self.canvas.create_text(padx, y, text=day, fill=INK_3,
+                if prev_day is not None:
+                    y += s(14)
+                hid = self.canvas.create_text(padx, y + s(4), text=day.upper(), fill=INK_3,
                                               anchor="nw", font=font_day)
                 hb = self.canvas.bbox(hid)
                 mid = (hb[1] + hb[3]) / 2
                 self.canvas.create_line(hb[2] + s(10), mid, w - padx, mid, fill=BORDER)
                 y = hb[3] + s(6)
                 prev_day = day
-                day_i = 0
-            even = day_i % 2 == 1
-            day_i += 1
-            base = ROW_EVEN if even else SURFACE
             failed = bool(entry.get("failed"))
             retrying = bool(entry.get("retrying"))
             shown_text = ("Tentando transcrever novamente..." if retrying else
                           "A transcrição falhou. Clique para tentar novamente.") if failed else entry["text"]
-            text_x = padx + time_w + s(6)
+            text_x = padx + time_w
             text_w = max(s(80), w - text_x - btns_w)
             tid = self.canvas.create_text(
                 text_x, y + pady, text=shown_text, fill=ACCENT_TEXT if failed else INK, anchor="nw",
@@ -2511,24 +2624,27 @@ class HistoryList(ctk.CTkFrame):
             th = tb[3] - tb[1]
             row_h = max(th, btn) + pady * 2
             bg = self.canvas.create_rectangle(
-                s(2), y, w - s(2), y + row_h, fill=base, outline="", width=0)
+                s(4), y, w - s(4), y + row_h, fill=SURFACE, outline="", width=0)
             self.canvas.tag_lower(bg, tid)
+            # hora alinhada na primeira linha do texto (fonte menor: desce 1-2 px)
             self.canvas.create_text(
-                padx, y + pady, text=dt.strftime("%H:%M"), fill=INK_3,
+                padx, y + pady + s(2), text=dt.strftime("%H:%M"), fill=INK_3,
                 anchor="nw", font=font_time)
-            copy_x1 = w - padx
+            copy_x1 = w - padx - s(4)
             copy_x0 = copy_x1 - btn
             play_x1 = copy_x0 - gap
             play_x0 = play_x1 - btn
             by = y + pady
-            self.canvas.create_text(
-                (play_x0 + play_x1) / 2, by + btn / 2, text="▶", fill=INK_2,
+            play_id = self.canvas.create_text(
+                (play_x0 + play_x1) / 2, by + btn / 2, text="▶", fill=INK_3,
                 font=font_btn, anchor="center")
-            self.canvas.create_text(
+            copy_id = self.canvas.create_text(
                 (copy_x0 + copy_x1) / 2, by + btn / 2,
                 text="…" if retrying else ("↻" if failed else "⧉"),
-                fill=ACCENT_TEXT if failed else INK_2,
+                fill=ACCENT_TEXT if failed else INK_3,
                 font=font_btn, anchor="center")
+            # separador fino entre ditados; some no ultimo de cada dia
+            self.canvas.create_line(padx, y + row_h, w - padx, y + row_h, fill=BORDER)
             self._hits.append({
                 "i": i, "y0": y, "y1": y + row_h,
                 "play": (play_x0, y, play_x1, y + row_h),
@@ -2536,9 +2652,10 @@ class HistoryList(ctk.CTkFrame):
                 "text": (text_x, y, play_x0 - s(4), y + row_h),
             })
             self._bg_ids[i] = bg
-            self._hover_even[i] = even
-            y += row_h + s(1)
-        self.canvas.configure(scrollregion=(0, 0, w, y + s(8)))
+            self._icon_ids[i] = (("play", play_id), ("copy", copy_id))
+            y += row_h + 1
+        self._content_h = y + s(10)
+        self.canvas.configure(scrollregion=(0, 0, w, self._content_h))
         self.canvas.yview_moveto(frac)
 
 
@@ -2559,6 +2676,8 @@ class App:
         self.settings = load_settings()
         self.devices = list_input_devices()
         self.loopback_devices = list_loopback_devices()
+        self.hardware = detect_hardware()
+        self.device_labels = execution_device_labels(self.hardware)
 
         self.text_queue: queue.Queue = queue.Queue()
         self.status_queue: queue.Queue = queue.Queue()
@@ -2593,143 +2712,146 @@ class App:
             "TkFixedFont",
         )
         root.configure(fg_color=BG)
+        PADX = self.PADX = 16
 
         # cabecalho: marca + modelo
         header = ctk.CTkFrame(root, fg_color="transparent")
-        header.pack(fill="x", padx=18, pady=(14, 10))
+        header.pack(fill="x", padx=PADX, pady=(14, 12))
         icon_png = Path(__file__).with_name("assets") / "sussurro.png"
         if icon_png.exists():
-            self._brand_img = ctk.CTkImage(Image.open(icon_png), size=(30, 30))
+            self._brand_img = ctk.CTkImage(Image.open(icon_png), size=(28, 28))
             ctk.CTkLabel(header, image=self._brand_img, text="").pack(side="left")
         ctk.CTkLabel(header, text="SUSSURRO", text_color=INK,
-                     font=(self.FONT_DISPLAY, 24)).pack(side="left", padx=(10, 0))
+                     font=(self.FONT_DISPLAY, 22)).pack(side="left", padx=(10, 0))
         self.model_label = ctk.CTkLabel(header, text="Preparando modelo...", text_color=INK_3,
                                         font=(self.FONT_MONO, 11))
         self.model_label.pack(side="right")
 
         # faixa de comando: GRAVAR e o unico laranja da janela
-        cmd = ctk.CTkFrame(root, fg_color="transparent")
-        cmd.pack(fill="x", padx=18, pady=(0, 10))
+        cmd = self.command_bar = ctk.CTkFrame(root, fg_color="transparent")
+        cmd.pack(fill="x", padx=PADX, pady=(0, 12))
         self.record_btn = ctk.CTkButton(
             cmd, text="GRAVAR", command=self.toggle, state="disabled",
-            width=132, height=40, corner_radius=10,
+            width=136, height=38, corner_radius=8,
             fg_color=ACCENT, hover_color=ACCENT_HOVER,
             text_color=GRAPHITE, text_color_disabled=GRAPHITE,
-            font=(self.FONT_DISPLAY, 17))
+            font=(self.FONT_DISPLAY, 16))
         self.record_btn.pack(side="left")
         for label, cb in (("Copiar tudo", self.copy_all), ("Limpar", self.clear)):
-            ctk.CTkButton(cmd, text=label, command=cb, width=104, height=40,
-                          corner_radius=10, fg_color="transparent", hover_color=SURFACE_2,
-                          border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-                          font=(self.FONT_UI, 13)).pack(side="left", padx=(8, 0))
+            self._secondary(cmd, label, cb, width=104, height=38).pack(side="left", padx=(8, 0))
 
         # card de configuracao: grade 3 colunas, rotulos caixa alta discretos
-        card = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
-        card.pack(fill="x", padx=18, pady=(0, 10))
+        card = self.config_card = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
+        card.pack(fill="x", padx=PADX, pady=(0, 12))
         for col in range(3):
             card.grid_columnconfigure(col, weight=1, uniform="cfg")
+        CPAD, GROUP = 16, 16   # margem interna do card; respiro entre grupos de linhas
 
         def cfg_label(text, r, c):
             ctk.CTkLabel(card, text=text, text_color=INK_3, anchor="w", height=14,
                          font=(self.FONT_UI, 10, "bold")).grid(
-                row=r, column=c, sticky="ew", padx=14, pady=((14, 0) if r == 0 else (10, 0)))
+                row=r, column=c, sticky="ew", padx=CPAD, pady=((CPAD, 0) if r == 0 else (GROUP, 0)))
 
-        def combo(values, current, command, r, c, bottom=0):
+        def combo(values, current, command, r, c):
             box = ctk.CTkComboBox(card, values=values, command=command, state="readonly",
-                                  height=30, corner_radius=8,
+                                  height=32, corner_radius=8,
                                   fg_color=SURFACE_2, border_color=BORDER,
                                   button_color=SURFACE_2, button_hover_color=SURFACE_3,
                                   dropdown_fg_color=SURFACE_2, dropdown_hover_color=SURFACE_3,
                                   dropdown_text_color=INK, text_color=INK,
                                   font=(self.FONT_UI, 12))
             box.set(current)
-            box.grid(row=r, column=c, sticky="ew", padx=14, pady=(4, bottom))
+            box.grid(row=r, column=c, sticky="ew", padx=CPAD, pady=(6, 0))
             return box
 
         cfg_label("ATALHO DO MOUSE", 0, 0)
-        cfg_label("ACAO", 0, 1)
+        cfg_label("AÇÃO", 0, 1)
         cfg_label("MICROFONE", 0, 2)
         hk = ctk.CTkFrame(card, fg_color="transparent")
-        hk.grid(row=1, column=0, sticky="ew", padx=14, pady=(4, 0))
+        hk.grid(row=1, column=0, sticky="ew", padx=CPAD, pady=(6, 0))
         hk.grid_columnconfigure(0, weight=1)
         self.hotkey_var = tk.StringVar(value=BUTTON_LABELS[self.settings["mouse_button"]])
-        ctk.CTkEntry(hk, textvariable=self.hotkey_var, state="readonly", height=30,
+        ctk.CTkEntry(hk, textvariable=self.hotkey_var, state="readonly", height=32,
                      corner_radius=8, fg_color=SURFACE_2, border_color=BORDER,
                      text_color=INK, font=(self.FONT_UI, 12)).grid(row=0, column=0, sticky="ew")
-        self.set_hotkey_btn = ctk.CTkButton(
-            hk, text="Setar", command=self.capture_hotkey, width=56, height=30,
-            corner_radius=8, fg_color="transparent", hover_color=SURFACE_2,
-            border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-            font=(self.FONT_UI, 12))
+        self.set_hotkey_btn = self._secondary(hk, "Setar", self.capture_hotkey, width=60)
         self.set_hotkey_btn.grid(row=0, column=1, padx=(6, 0))
         self.trigger = combo(["alternar", "segurar"], self.settings["trigger_mode"],
                              self._on_trigger, 1, 1)
-        names = list(self.devices)
+        self.mic_by_label = {device.label: device for device in self.devices.values()}
+        names = list(self.mic_by_label)
         saved = self.settings["device_name"]
-        self.mic = combo(names, saved if saved in self.devices else (names[0] if names else ""),
+        saved_device = self.devices.get(saved)
+        current_mic = saved_device.label if saved_device else (names[0] if names else "")
+        self.mic = combo(names, current_mic,
                          self._on_mic, 1, 2)
-        cfg_label("TRANSCRICAO", 2, 0)
+        cfg_label("TRANSCRIÇÃO", 2, 0)
         cfg_label("ENVIO", 2, 1)
         cfg_label("IDIOMA", 2, 2)
         self.mode = combo(["simultaneo", "final"], self.settings["transcribe_mode"],
-                          self._on_mode, 3, 0, bottom=14)
+                          self._on_mode, 3, 0)
         self.inject = combo(["colar", "digitar"], self.settings["inject_method"],
-                            self._on_inject, 3, 1, bottom=14)
+                            self._on_inject, 3, 1)
         self.lang = combo(["pt", "en", "auto"], self.settings["language"],
-                          self._on_lang, 3, 2, bottom=14)
+                          self._on_lang, 3, 2)
 
         # 3a linha: fonte de captura (mic / audio do PC / os dois) + canal do PC
         cfg_label("FONTE", 4, 0)
         cfg_label("CANAL DO PC", 4, 1)
         self.fonte = combo(["microfone", "audio do PC", "os dois"],
                            CAPTURE_LABELS[self.settings["capture_mode"]],
-                           self._on_fonte, 5, 0, bottom=14)
+                           self._on_fonte, 5, 0)
         pc_names = ["padrao do sistema"] + list(self.loopback_devices)
         saved_pc = self.settings["loopback_device_name"]
         if saved_pc not in self.loopback_devices:
             saved_pc = None
         self.pc_channel = combo(pc_names, "padrao do sistema" if saved_pc is None else saved_pc,
-                                self._on_pc_channel, 5, 1, bottom=14)
+                                self._on_pc_channel, 5, 1)
         self.pc_channel.configure(
             state="disabled" if self.settings["capture_mode"] == "microfone" else "readonly")
-        ctk.CTkLabel(card, text="", height=14).grid(row=4, column=2,
-                                                    padx=14, pady=(10, 0))
+        cfg_label("O QUE ESTA ENTRADA FAZ", 4, 2)
+        self.mic_help = ctk.CTkLabel(
+            card, text="", text_color=INK_3, font=(self.FONT_UI, 11),
+            anchor="nw", justify="left", wraplength=340)
+        self.mic_help.grid(row=5, column=2, sticky="new", padx=CPAD, pady=(8, 0))
+        self._update_mic_help()
 
         cfg_label("MODELO", 6, 0)
         cfg_label("EXECUTAR EM", 6, 1)
         self.model_choice = combo(list(MODEL_LABELS.values()),
                                   MODEL_LABELS[self.settings["whisper_model"]], lambda _: None, 7, 0)
-        self.device_choice = combo(list(DEVICE_LABELS.values()),
-                                   DEVICE_LABELS[self.settings["whisper_device"]], lambda _: None, 7, 1)
-        self.apply_model_btn = ctk.CTkButton(
-            card, text="Aplicar modelo", command=self._apply_model, height=30,
-            fg_color=SURFACE_2, hover_color=SURFACE_3, text_color=INK,
-            border_width=1, border_color=BORDER_STRONG, font=(self.FONT_UI, 12))
-        self.apply_model_btn.grid(row=7, column=2, sticky="ew", padx=14, pady=(4, 0))
-        ctk.CTkLabel(card, text="CPU basico: Base · CPU moderno: Small · RTX 3060 / 4070 / 4090: Turbo\n"
-                               "Large-v3: opcao para priorizar precisao. Primeiro uso baixa o modelo.",
+        self.device_choice = combo(list(self.device_labels.values()),
+                                   self.device_labels[self.settings["whisper_device"]], lambda _: None, 7, 1)
+        self.apply_model_btn = self._secondary(card, "Aplicar modelo", self._apply_model)
+        self.apply_model_btn.grid(row=7, column=2, sticky="ew", padx=CPAD, pady=(6, 0))
+        ctk.CTkLabel(card, text="CPU básico: Base · CPU moderno: Small · GPU NVIDIA: Turbo · "
+                               "Large-v3 prioriza precisão.\n" + execution_hardware_note(self.hardware),
                      text_color=INK_3, font=(self.FONT_UI, 11), anchor="w", justify="left").grid(
-            row=8, column=0, columnspan=3, sticky="ew", padx=14, pady=(8, 12))
+            row=8, column=0, columnspan=3, sticky="ew", padx=CPAD, pady=(12, CPAD))
 
         # abas: acento fica no GRAVAR; aba ativa marca por chapa mais clara
-        tabbar = ctk.CTkFrame(root, fg_color="transparent")
-        tabbar.pack(fill="x", padx=18, pady=(0, 6))
+        tabbar = self.tabbar = ctk.CTkFrame(root, fg_color="transparent")
+        tabbar.pack(fill="x", padx=PADX, pady=(0, 8))
         self.tab_btns = {}
-        tabs = [("historico", "HISTORICO"), ("aovivo", "AO VIVO"),
-                ("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATISTICAS")]
+        tabs = [("historico", "HISTÓRICO"), ("aovivo", "AO VIVO"),
+                ("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATÍSTICAS"),
+                ("comparar", "COMPARAR")]
         if self.gestures is not None:
             tabs.append(("omarchy", "OMARCHY"))
+        tab_font = (self.FONT_DISPLAY, 13)
+        tab_measure = tkfont.Font(font=tab_font)
         for name, label in tabs:
-            btn = ctk.CTkButton(tabbar, text=label, width=118, height=30, corner_radius=8,
+            btn = ctk.CTkButton(tabbar, text=label, height=30, corner_radius=8,
+                                width=tab_measure.measure(label) + 28,
                                 fg_color="transparent", hover_color=SURFACE_2,
-                                text_color=INK_3, font=(self.FONT_DISPLAY, 14),
+                                text_color=INK_3, font=tab_font,
                                 command=lambda n=name: self._show_tab(n))
-            btn.pack(side="left", padx=(0, 6))
+            btn.pack(side="left", padx=(0, 4))
             self.tab_btns[name] = btn
 
         # status empacotado antes do conteudo (side=bottom) pra nunca ser espremido pra fora
         status_bar = ctk.CTkFrame(root, fg_color="transparent")
-        status_bar.pack(side="bottom", fill="x", padx=18, pady=(2, 8))
+        status_bar.pack(side="bottom", fill="x", padx=PADX, pady=(4, 10))
         self.status = ctk.CTkLabel(status_bar, text="Iniciando...", text_color=INK_3,
                                    anchor="w", font=(self.FONT_MONO, 11))
         self.status.pack(side="left")
@@ -2738,7 +2860,7 @@ class App:
 
         # card de conteudo: historico / ao vivo
         self.content = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
-        self.content.pack(fill="both", expand=True, padx=18, pady=(0, 4))
+        self.content.pack(fill="both", expand=True, padx=PADX, pady=(0, 4))
         self._playing = None
         self.hist_frame = HistoryList(
             self.content, font_mono=self.FONT_MONO, font_ui=self.FONT_UI,
@@ -2755,6 +2877,9 @@ class App:
                       "biblioteca": self.lib_tab, "estatisticas": self.stats_frame}
         if self.gestures is not None:
             self._tabs["omarchy"] = self._build_devices_tab()
+        self.compare_panel = ComparisonPanel(self.content, self, StreamResampler)
+        self._tabs["comparar"] = self.compare_panel
+        root.protocol("WM_DELETE_WINDOW", self._close)
         self._tab = None
         self._show_tab("historico")
 
@@ -2773,6 +2898,20 @@ class App:
         self._begin_model_load(dict(self.settings), persist=False)
         root.after(UI_POLL_MS, self._poll)
 
+    def _secondary(self, master, text, command, width=None, height=32, **kw):
+        """Botao neutro padrao: chapa sutil, borda fina, sem acento (o acento e do GRAVAR)."""
+        opts = dict(text=text, command=command, height=height, corner_radius=8,
+                    fg_color=SURFACE_2, hover_color=SURFACE_3, border_width=1,
+                    border_color=BORDER, text_color=INK_2, font=(self.FONT_UI, 12))
+        if width is not None:
+            opts["width"] = width
+        opts.update(kw)
+        return ctk.CTkButton(master, **opts)
+
+    def _close(self):
+        self.compare_panel.close()
+        self.root.destroy()
+
     # -- abas / historico ----------------------------------------------------
     def _show_tab(self, name: str):
         if name == "estatisticas":
@@ -2786,6 +2925,12 @@ class App:
             self._geom_antes = None
         if name == self._tab:
             return
+        if name == "comparar":
+            self.command_bar.pack_forget()
+            self.config_card.pack_forget()
+        elif self._tab == "comparar":
+            self.config_card.pack(fill="x", padx=self.PADX, pady=(0, 12), before=self.tabbar)
+            self.command_bar.pack(fill="x", padx=self.PADX, pady=(0, 12), before=self.config_card)
         self._tab = name
         for n, btn in self.tab_btns.items():
             if n == name:
@@ -2996,7 +3141,7 @@ class App:
                      font=(self.FONT_UI, 10, "bold")).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         def field(placeholder, col):
-            e = ctk.CTkEntry(form, placeholder_text=placeholder, height=30, corner_radius=8,
+            e = ctk.CTkEntry(form, placeholder_text=placeholder, height=32, corner_radius=8,
                              fg_color=SURFACE_2, border_color=BORDER, text_color=INK,
                              placeholder_text_color=INK_3, font=(self.FONT_UI, 12))
             e.grid(row=1, column=col, sticky="ew", padx=(6 if col == 0 else 8, 0), pady=(4, 0))
@@ -3005,10 +3150,8 @@ class App:
 
         self.lib_wrong = field("grock, groque, grote", 0)
         self.lib_right = field("Grok", 1)
-        ctk.CTkButton(form, text="Adicionar", command=self._lib_add, width=92, height=30,
-                      corner_radius=8, fg_color="transparent", hover_color=SURFACE_2,
-                      border_width=1, border_color=BORDER_STRONG, text_color=INK_2,
-                      font=(self.FONT_UI, 12)).grid(row=1, column=2, padx=(8, 6), pady=(4, 0))
+        self._secondary(form, "Adicionar", self._lib_add, width=96).grid(
+            row=1, column=2, padx=(8, 6), pady=(4, 0))
         self.lib_list = ctk.CTkScrollableFrame(wrap, fg_color="transparent")
         self.lib_list.pack(fill="both", expand=True)
         return wrap
@@ -3021,14 +3164,13 @@ class App:
                          text_color=INK_3, font=(self.FONT_UI, 12)).pack(anchor="w", padx=10, pady=10)
             return
         for i, entry in enumerate(self.library.entries):
-            base = "transparent" if i % 2 == 0 else ROW_EVEN
-            row = ctk.CTkFrame(self.lib_list, fg_color=base, corner_radius=8)
+            row = ctk.CTkFrame(self.lib_list, fg_color="transparent", corner_radius=8)
             row.pack(fill="x", padx=2, pady=1)
             ctk.CTkButton(row, text="✕", command=lambda n=i: self._lib_remove(n),
-                          width=30, height=26, corner_radius=8, fg_color="transparent",
-                          hover_color=SURFACE_3, border_width=1, border_color=BORDER_STRONG,
-                          text_color=INK_2, font=(self.FONT_UI, 12)).pack(
-                side="right", anchor="n", padx=(6, 8), pady=6)
+                          width=28, height=26, corner_radius=6, fg_color="transparent",
+                          hover_color=SURFACE_3, text_color=INK_3,
+                          font=(self.FONT_UI, 12)).pack(
+                side="right", anchor="n", padx=(6, 8), pady=5)
             ctk.CTkLabel(row, text=entry["certo"], text_color=INK, width=130, anchor="w",
                          font=(self.FONT_UI, 12, "bold")).pack(side="left", padx=(10, 6), pady=6)
             ctk.CTkLabel(row, text="⟵  " + ", ".join(entry["erros"]), text_color=INK_3,
@@ -3082,10 +3224,8 @@ class App:
             lab = ctk.CTkLabel(col, text="—", text_color=INK, anchor="w", font=(self.FONT_UI, 12))
             lab.pack(fill="x")
             self.dev_status_labels[key] = lab
-        self.dev_udev_btn = ctk.CTkButton(
-            st, text="Instalar regra udev", command=self._dev_install_udev, width=150, height=30,
-            corner_radius=8, fg_color="transparent", hover_color=SURFACE_3, border_width=1,
-            border_color=BORDER_STRONG, text_color=INK_2, font=(self.FONT_UI, 12))
+        self.dev_udev_btn = self._secondary(st, "Instalar regra udev", self._dev_install_udev,
+                                            width=150)
 
         # liga/desliga
         sw = ctk.CTkFrame(wrap, fg_color="transparent")
@@ -3246,8 +3386,15 @@ class App:
         self._save()
 
     def _on_mic(self, _e):
-        self.settings["device_name"] = self.mic.get()
+        device = self.mic_by_label.get(self.mic.get())
+        self.settings["device_name"] = device.name if device else None
+        self._update_mic_help()
         self._save()
+
+    def _update_mic_help(self):
+        device = self.mic_by_label.get(self.mic.get())
+        self.mic_help.configure(
+            text=device.description if device else "Nenhuma entrada de microfone encontrada.")
 
     def _on_fonte(self, _e):
         mode = CAPTURE_VALUES[self.fonte.get()]
@@ -3282,7 +3429,8 @@ class App:
 
     # -- gravacao -----------------------------------------------------------
     def _device_index(self):
-        return self.devices.get(self.mic.get())
+        device = self.mic_by_label.get(self.mic.get())
+        return device.index if device else None
 
     def _pc_device_index(self):
         name = self.settings["loopback_device_name"]
@@ -3291,6 +3439,9 @@ class App:
         return self.loopback_devices[name]
 
     def _start(self, inject: bool, auto_enter: bool = False):
+        if self.transcriber.comparing.is_set():
+            self.status.configure(text="Comparacao em andamento — termine ou cancele na aba COMPARAR.")
+            return False
         if self.transcriber.model is None or self.transcriber.model_loading.is_set():
             self.status.configure(text="Modelo ainda carregando — aguarde.")
             return False
@@ -3355,7 +3506,7 @@ class App:
             return
         selection = {
             "whisper_model": next(k for k, v in MODEL_LABELS.items() if v == self.model_choice.get()),
-            "whisper_device": next(k for k, v in DEVICE_LABELS.items() if v == self.device_choice.get()),
+            "whisper_device": next(k for k, v in self.device_labels.items() if v == self.device_choice.get()),
         }
         self._begin_model_load(selection, persist=True)
 

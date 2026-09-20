@@ -18,6 +18,19 @@ DP-1 connected primary 2560x1440+4480+0 (normal)
 '''
 
 class MonitorCoordinates(unittest.TestCase):
+    def test_successful_bar_placement_is_cached_from_repl_result(self):
+        h = Hypr()
+        monitor = NATIVE[0]
+        h._native_mons = [monitor]
+        with patch.object(h, 'monitor_at', return_value=monitor), \
+             patch('sussurro_hypr.subprocess.run') as run:
+            # Model hyprctl's actual CLI: eval discards the returned value.
+            run.side_effect = lambda cmd, **kw: SimpleNamespace(
+                returncode=0, stdout='true\n' if cmd[1] == 'repl' else 'ok\n')
+            self.assertTrue(h.place_bar(100, 100))
+            self.assertTrue(h.place_bar(100, 100))
+            run.assert_called_once()
+
     def hypr(self, point):
         h = Hypr()
         h.available = True

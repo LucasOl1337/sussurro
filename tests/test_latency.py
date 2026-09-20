@@ -101,22 +101,67 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(app.paste_strategy(None), 'ctrl_v')
 
     def test_terminal_paste_sends_ctrl_shift_v(self):
+        # Com ydotoold no ar as teclas saem por uinput (keycodes evdev), nunca
+        # por wtype: o teclado virtual do wtype faz o Hyprland reenviar o keymap
+        # a cada evento e trava a sessao (ver _ydotool_keys).
         t = self.transcriber()
         with patch.object(app, '_is_wayland', return_value=True), \
+             patch.object(app.shutil, 'which', return_value='/usr/bin/ydotool'), \
+             patch.object(app, '_ydotool_env', return_value={'YDOTOOL_SOCKET': '/tmp/x'}), \
+             patch.object(app.subprocess, 'run') as run:
+            run.return_value = SimpleNamespace(returncode=0)
+            self.assertTrue(t._send_paste_key('terminal'))
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[:2], ['ydotool', 'key'])
+            self.assertIn('42:1', cmd)  # shift
+            self.assertTrue(t._send_paste_key('ctrl_v'))
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd[:2], ['ydotool', 'key'])
+            self.assertNotIn('42:1', cmd)
+            self.assertEqual(cmd[-4:], ['29:1', '47:1', '47:0', '29:0'])
+
+    def test_paste_falls_back_to_wtype_without_ydotoold(self):
+        t = self.transcriber()
+        with patch.object(app, '_is_wayland', return_value=True), \
+             patch.object(app, '_hypr', return_value=SimpleNamespace(available=False)), \
              patch.object(app.shutil, 'which', return_value='/usr/bin/wtype'), \
+             patch.object(app, '_ydotool_env', return_value={}), \
              patch.object(app.subprocess, 'run') as run:
             run.return_value = SimpleNamespace(returncode=0)
             self.assertTrue(t._send_paste_key('terminal'))
             cmd = run.call_args[0][0]
             self.assertEqual(cmd[0], 'wtype')
             self.assertIn('shift', cmd)
-            self.assertNotEqual(cmd, ['wtype', '-M', 'ctrl', '-k', 'v', '-m', 'ctrl'])
             self.assertTrue(t._send_paste_key('ctrl_v'))
             self.assertEqual(run.call_args[0][0], ['wtype', '-M', 'ctrl', '-k', 'v', '-m', 'ctrl'])
 
+    def test_hyprland_does_not_fallback_to_virtual_keymap_for_paste_or_enter(self):
+        t = self.transcriber()
+        with patch.object(app, '_is_wayland', return_value=True), \
+             patch.object(app, '_hypr', return_value=SimpleNamespace(available=True)), \
+             patch.object(app, '_ydotool_keys', return_value=False), \
+             patch.object(app.subprocess, 'run') as run, \
+             patch.object(app.time, 'sleep'):
+            self.assertFalse(t._send_paste_key('terminal'))
+            with self.assertRaises(RuntimeError):
+                t._press_enter()
+            run.assert_not_called()
+
+    def test_hyprland_clipboard_failure_preserves_text_without_virtual_typing(self):
+        t = self.transcriber()
+        with patch.object(app, 'prepare_paste_target', return_value='foot'), \
+             patch.object(app, '_is_wayland', return_value=True), \
+             patch.object(app, '_hypr', return_value=SimpleNamespace(available=True)), \
+             patch.object(app, 'backup_clipboard', return_value=b'original'), \
+             patch.object(app, 'set_clipboard_text', return_value=False), \
+             patch.object(t, '_type_fallback') as fallback:
+            with self.assertRaises(RuntimeError):
+                t._paste_linux('ditado')
+            fallback.assert_not_called()
+
     def test_foot_paste_uses_terminal_chord(self):
         t = self.transcriber()
-        with patch.object(app, 'focused_window_class', return_value='foot'), \
+        with patch.object(app, 'prepare_paste_target', return_value='foot'), \
              patch.object(app, 'backup_clipboard', return_value=b'orig'), \
              patch.object(app, 'set_clipboard_text', return_value=True), \
              patch.object(t, '_send_paste_key', return_value=True) as send:
@@ -125,7 +170,7 @@ class LatencyTests(unittest.TestCase):
 
     def test_codex_desktop_paste_uses_ctrl_v(self):
         t = self.transcriber()
-        with patch.object(app, 'focused_window_class', return_value='ChatGPT'), \
+        with patch.object(app, 'prepare_paste_target', return_value='ChatGPT'), \
              patch.object(t, '_type_fallback') as type_fallback, \
              patch.object(app, 'backup_clipboard', return_value=b'orig'), \
              patch.object(threading.Timer, 'start'), \
@@ -136,7 +181,7 @@ class LatencyTests(unittest.TestCase):
             write.assert_called_once_with('cole isto no Codex')
             send.assert_called_once_with('ctrl_v')
 
-    def test_paste_returns_before_restore_and_restores_original(self):
+    def test_paste_leaves_dictation_without_background_restore(self):
         t = self.transcriber()
         clipboard = [b'original']
         restored = threading.Event()
@@ -144,17 +189,45 @@ class LatencyTests(unittest.TestCase):
             clipboard[0] = text.encode(); return True
         def restore(data):
             clipboard[0] = data; restored.set()
-        with patch.object(app, 'backup_clipboard', side_effect=lambda: clipboard[0]), \
+        with patch.object(app, 'prepare_paste_target', return_value='chromium'), \
+             patch.object(app, 'backup_clipboard', side_effect=lambda: clipboard[0]), \
              patch.object(app, 'set_clipboard_text', side_effect=write), \
              patch.object(app, 'restore_clipboard', side_effect=restore), \
-             patch.object(t, '_send_paste_key', return_value=True):
+             patch.object(t, '_send_paste_key', return_value=True), \
+             patch.object(app.threading, 'Timer') as timer:
             start = time.perf_counter()
             t._paste_linux('ação rápida')
             self.assertLess(time.perf_counter() - start, .25)
             self.assertEqual(clipboard[0], 'ação rápida'.encode())
             self.assertFalse(restored.is_set())
-            self.assertTrue(restored.wait(2))
-            self.assertEqual(clipboard[0], b'original')
+            timer.assert_not_called()
+
+    def test_delayed_web_field_reads_dictation_after_old_restore_deadline(self):
+        t = self.transcriber()
+        clipboard = [b'original']
+        received = []
+        target_read = threading.Event()
+        def write(text):
+            clipboard[0] = text.encode()
+            return True
+        def restore(data):
+            clipboard[0] = data
+        def read_later():
+            received.append(clipboard[0])
+            target_read.set()
+        def send(_strategy):
+            timer = threading.Timer(1.25, read_later)
+            timer.daemon = True
+            timer.start()
+            return True
+        with patch.object(app, 'prepare_paste_target', return_value='chromium'), \
+             patch.object(app, 'backup_clipboard', side_effect=lambda: clipboard[0]), \
+             patch.object(app, 'set_clipboard_text', side_effect=write), \
+             patch.object(app, 'restore_clipboard', side_effect=restore), \
+             patch.object(t, '_send_paste_key', side_effect=send):
+            t._paste_linux('texto para o campo web')
+            self.assertTrue(target_read.wait(2))
+        self.assertEqual(received, [b'texto para o campo web'])
 
     @unittest.skipIf(app.IS_WIN, 'Clipboard owner process is a Unix behavior')
     def test_copy_and_restore_do_not_wait_for_background_clipboard_owner(self):
@@ -176,18 +249,23 @@ class LatencyTests(unittest.TestCase):
                 self.assertLess(time.perf_counter() - started, .6)
                 self.assertEqual(output.read_bytes(), b'original')
 
-    def test_late_restore_does_not_overwrite_user_copy_or_new_paste(self):
+    def test_consecutive_pastes_do_not_restore_old_clipboard(self):
         t = self.transcriber()
-        pending = (b'original', b'dictation', 0)
-        t._clipboard_restore = pending
-        with patch.object(app, 'backup_clipboard', return_value=b'user copied this'), \
-             patch.object(app, 'restore_clipboard') as restore:
-            t._restore_linux_clipboard(pending)
-            restore.assert_not_called()
-            newer = (b'user copied this', b'new dictation', 0)
-            t._clipboard_restore = newer
-            t._restore_linux_clipboard(pending)
-            self.assertIs(t._clipboard_restore, newer)
+        clipboard = [b'old image']
+        def write(text):
+            clipboard[0] = text.encode()
+            return True
+        with patch.object(app, 'prepare_paste_target', return_value='foot'), \
+             patch.object(app, 'set_clipboard_text', side_effect=write), \
+             patch.object(app, 'backup_clipboard') as backup, \
+             patch.object(app, 'restore_clipboard') as restore, \
+             patch.object(t, '_send_paste_key', return_value=True):
+            t._paste_linux('primeiro')
+            self.assertEqual(clipboard[0], b'primeiro')
+            clipboard[0] = b'user copy'
+            t._paste_linux('segundo')
+            self.assertEqual(clipboard[0], b'segundo')
+            backup.assert_not_called()
             restore.assert_not_called()
 
     def test_no_second_vad_scan_for_final_mode(self):
@@ -212,6 +290,20 @@ class LatencyTests(unittest.TestCase):
         self.assertFalse(status['ready'])
         self.assertTrue(status['busy'])
         self.assertFalse(status['recording'])
+
+    def test_failed_delivery_does_not_press_enter_in_wrong_window(self):
+        t = self.transcriber()
+        t._session_auto_enter = True
+        t._session_emitted = True
+        t._session_inject = True
+        t._session_errors = ['Nao foi possivel focar o destino']
+        events = iter([(None, None, None, t._session_id, 0.0)])
+        t._segment_queue.get = lambda: next(events)
+        with patch.object(t, '_press_enter') as enter, \
+             patch.object(t, '_finalize_session'):
+            with self.assertRaises(StopIteration):
+                t._transcribe_loop()
+        enter.assert_not_called()
 
     def test_transcription_failure_still_archives_audio(self):
         t = self.transcriber()
