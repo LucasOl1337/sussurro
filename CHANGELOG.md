@@ -2,6 +2,20 @@
 
 As mudanças de cada versão do Sussurro são registradas aqui. As versões seguem o formato `MAJOR.MINOR.PATCH`.
 
+## [Não lançado]
+
+### Adicionado
+
+- Aba REUNIÃO (Linux): grava o microfone e o áudio do PC em duas trilhas, transcreve cada lado na GPU com o modelo do ditado e separa várias vozes do mesmo lado com o Nemotron 3 Diarization. Eco dos outros no microfone fica de fora, falantes podem ser renomeados, a transcrição toca a partir de qualquer linha e sai em Markdown numa pasta por reunião. Importa qualquer arquivo de áudio e recupera a gravação se o app cair. Portado do Meeting Recorder de Jankees van Woezik (MIT).
+- Comandos `meeting-start`, `meeting-stop` e `meeting-pause` para atalhos do Hyprland.
+- Parakeet TDT 0.6B v3 (NVIDIA) no seletor de modelos e no COMPARAR: só GPU, convertido para FP16 no primeiro uso. O mais rápido de todos, mas sem idioma fixo; em português às vezes escorrega para o inglês.
+- `sussurro_meeting.py` transcreve reuniões e arquivos pela linha de comando, no mesmo formato do bench do Meeting Recorder.
+
+### Melhorado
+
+- O ditado descarta o "Tchau." / "Obrigado." que o Whisper inventa no silêncio do fim: só sai o trecho que é inteiro uma frase-padrão e está bem abaixo do volume da sua fala.
+- Sete abas cabem na largura da janela.
+
 ## [0.5.0] — 2026-09-19
 
 - Integração com Hyprland Lua: foco usa `hl.dsp.focus`, e posicionamento da barra lê o resultado com `hyprctl repl`. Uma posição já aplicada volta a ser reconhecida, evitando comandos repetidos durante a gravação.

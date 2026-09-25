@@ -40,7 +40,7 @@ class ComparisonPanel(ctk.CTkFrame):
         choices.pack(fill='x', padx=16, pady=8)
         for i, model in enumerate(m for m in MODEL_LABELS if m != 'auto'):
             var = ctk.BooleanVar(value=True)
-            box = ctk.CTkCheckBox(choices, text=model.replace('large-v3-turbo', 'Turbo'),
+            box = ctk.CTkCheckBox(choices, text=model.replace('large-v3-turbo', 'Turbo').replace('parakeet-tdt-0.6b-v3', 'Parakeet'),
                                  variable=var, width=140, font=self.font,
                                  fg_color=ACCENT, hover_color='#d64708')
             box.grid(row=i // 3, column=i % 3, sticky='w', pady=4, padx=(0, 14))

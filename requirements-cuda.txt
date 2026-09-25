@@ -3,3 +3,13 @@
 # CUDA runtime do ctranslate2 (mesmas versoes validadas no Windows em 2026-08-21)
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.24.0.43
+
+# Parakeet (NVIDIA) e separacao de vozes da reuniao (Nemotron): onnxruntime na GPU.
+# CUDA 12 como o CTranslate2; a 1.24.4 e a ultima CUDA 12 com wheel cp314 aceita pelo onnx-asr.
+# Ela substitui o onnxruntime de CPU que o faster-whisper puxa: instale com
+# `--override overrides-cuda.txt` (uv) para os dois nao brigarem pelo mesmo modulo.
+onnxruntime-gpu[cuda,cudnn]==1.24.4
+onnx-asr>=0.12
+# conversao do Parakeet para FP16 no primeiro uso (metade da VRAM)
+onnx
+onnxconverter-common

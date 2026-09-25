@@ -60,6 +60,8 @@ import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from sussurro_compare_ui import ComparisonPanel
+if not IS_WIN:
+    from sussurro_meeting_ui import MeetingPanel
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from faster_whisper.utils import download_model
@@ -68,6 +70,8 @@ from sussurro_hardware import (detect_hardware, execution_device_labels,
                                execution_hardware_note)
 from sussurro_models import (MODEL_LABELS, DEFAULT_MODEL_SETTINGS,
                              normalize_model_settings, resolve_model_config, model_path)
+import sussurro_parakeet
+from sussurro_meeting import drop_hallucinations
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 from pynput import keyboard, mouse
 
@@ -929,6 +933,7 @@ class Transcriber:
         self._session_auto_enter = False  # fone: aperta Enter depois da ultima colagem
         self._session_id = 0          # cancelar/reiniciar invalida o que ficou em voo
         self._file_jobs = 0
+        self._meeting_jobs = 0        # reuniao salvando/transcrevendo: segura a troca de modelo
         self._pending = 0             # trechos aceitos e ainda nao entregues
         self._pending_lock = threading.Lock()
         self._drained = True          # todos os trechos foram entregues e arquivados
@@ -947,13 +952,16 @@ class Transcriber:
         try:
             with self._model_lock:
                 with self._pending_lock:
-                    if self.comparing.is_set() or self._file_jobs or self._pending or self.recording.is_set() or not self._drained or self._retrying.is_set():
+                    if (self.comparing.is_set() or self._file_jobs or self._meeting_jobs or self._pending
+                            or self.recording.is_set() or not self._drained or self._retrying.is_set()):
                         raise RuntimeError("Aguarde o trabalho atual terminar antes de trocar o modelo.")
                 config = resolve_model_config(settings or DEFAULT_MODEL_SETTINGS)
                 self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
                 # Network failure leaves the current model usable.
-                path = model_path(config.model, download_model)
+                path = self._weights(config)
                 previous = self.model_config
+                if previous is not None and previous.engine == "parakeet" and self.model is not None:
+                    self.model.close()  # sessoes do onnxruntime nao somem so com gc
                 self.model = None
                 self.model_config = None
                 gc.collect()
@@ -963,7 +971,7 @@ class Transcriber:
                     # Do not hold two models in VRAM. Recover from the local cache only.
                     if previous is not None:
                         try:
-                            self._load_model_config(previous, download_model(previous.model, local_files_only=True))
+                            self._load_model_config(previous, self._weights(previous, local_only=True))
                         except Exception:
                             self.model = None
                             self.model_config = None
@@ -971,10 +979,20 @@ class Transcriber:
         finally:
             self.model_loading.clear()
 
+    def _weights(self, config, local_only=False):
+        if config.engine == "parakeet":
+            return sussurro_parakeet.model_dir(download=not local_only, status=self.status_queue.put)
+        if local_only:
+            return download_model(config.model, local_files_only=True)
+        return model_path(config.model, download_model)
+
     def _load_model_config(self, config, path):
         self.status_queue.put(f"Carregando {config.label}...")
         t0 = time.perf_counter()
-        model = WhisperModel(path, device=config.device, compute_type=config.compute_type)
+        if config.engine == "parakeet":
+            model = sussurro_parakeet.ParakeetModel(path)
+        else:
+            model = WhisperModel(path, device=config.device, compute_type=config.compute_type)
         try:
             silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
             segments, _ = model.transcribe(silence, language="pt", beam_size=5)
@@ -982,7 +1000,10 @@ class Transcriber:
             get_speech_timestamps(silence, VAD_OPTIONS)
         except Exception:
             # Explicitly free failed weights before attempting to recover the old model.
-            model.model.unload_model()
+            if config.engine == "parakeet":
+                model.close()
+            else:
+                model.model.unload_model()
             raise
         self.model = model
         self.model_config = config
@@ -1191,10 +1212,24 @@ class Transcriber:
     def acquire_comparison(self):
         with self._pending_lock:
             if (self.comparing.is_set() or self.recording.is_set() or not self._drained
-                    or self._pending or self._file_jobs or self._retrying.is_set()
+                    or self._pending or self._file_jobs or self._meeting_jobs or self._retrying.is_set()
                     or self.model_loading.is_set() or self._model_lock.locked()):
-                raise RuntimeError("Aguarde o ditado, arquivo ou carregamento atual terminar.")
+                raise RuntimeError("Aguarde o ditado, arquivo, reuniao ou carregamento atual terminar.")
             self.comparing.set()
+
+    def begin_meeting_job(self):
+        """A reuniao usa o modelo do ditado (sob o _model_lock so no whisper); a troca de
+        modelo e a comparacao esperam, o ditado segue entre um lado e outro."""
+        with self._pending_lock:
+            if self.model is None or self.model_loading.is_set():
+                raise RuntimeError("O modelo ainda esta carregando.")
+            if self.comparing.is_set():
+                raise RuntimeError("Comparacao de modelos em andamento.")
+            self._meeting_jobs += 1
+
+    def end_meeting_job(self):
+        with self._pending_lock:
+            self._meeting_jobs -= 1
 
     def _pending_done(self):
         with self._pending_lock:
@@ -1381,7 +1416,7 @@ class Transcriber:
                 audio, language=language, beam_size=5, vad_filter=vad_filter,
                 hotwords=self.library.hotwords,
             )
-            return list(segments), info
+            return drop_hallucinations(list(segments), audio), info
 
     def transcribe_file(self, path: str) -> dict:
         """Transcreve um arquivo de audio e arquiva no historico, sem microfone nem colagem.
@@ -2043,6 +2078,9 @@ class IpcServer(threading.Thread):
         # "toggle-enter"/"start-enter"/"stop-enter": veio do fone (daemon x9-sussurro);
         # ao terminar de colar, o Sussurro aperta Enter para confirmar o envio.
         base, _, flag = data.partition("-")
+        if base == "meeting" and flag in ("start", "stop", "pause"):
+            self.event_queue.put(("meeting", flag))
+            return "ok\n"
         if base in ("toggle", "start", "stop") and flag in ("", "enter"):
             _perf("activation_request", source="ipc", command=data)
             self.event_queue.put((base, {"enter": True} if flag == "enter" else None))
@@ -2825,7 +2863,8 @@ class App:
         self.apply_model_btn = self._secondary(card, "Aplicar modelo", self._apply_model)
         self.apply_model_btn.grid(row=7, column=2, sticky="ew", padx=CPAD, pady=(6, 0))
         ctk.CTkLabel(card, text="CPU básico: Base · CPU moderno: Small · GPU NVIDIA: Turbo · "
-                               "Large-v3 prioriza precisão.\n" + execution_hardware_note(self.hardware),
+                               "Large-v3 prioriza precisão.\nParakeet (só GPU): o mais rápido, sem idioma fixo; "
+                               "em português às vezes escorrega pro inglês.\n" + execution_hardware_note(self.hardware),
                      text_color=INK_3, font=(self.FONT_UI, 11), anchor="w", justify="left").grid(
             row=8, column=0, columnspan=3, sticky="ew", padx=CPAD, pady=(12, CPAD))
 
@@ -2833,20 +2872,22 @@ class App:
         tabbar = self.tabbar = ctk.CTkFrame(root, fg_color="transparent")
         tabbar.pack(fill="x", padx=PADX, pady=(0, 8))
         self.tab_btns = {}
-        tabs = [("historico", "HISTÓRICO"), ("aovivo", "AO VIVO"),
-                ("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATÍSTICAS"),
-                ("comparar", "COMPARAR")]
+        tabs = [("historico", "HISTÓRICO"), ("aovivo", "AO VIVO")]
+        if not IS_WIN:
+            tabs.append(("reuniao", "REUNIÃO"))  # parec/pacat: PulseAudio ou PipeWire
+        tabs += [("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATÍSTICAS"),
+                 ("comparar", "COMPARAR")]
         if self.gestures is not None:
             tabs.append(("omarchy", "OMARCHY"))
-        tab_font = (self.FONT_DISPLAY, 13)
+        tab_font = (self.FONT_DISPLAY, 12)  # sete abas cabem nos 760 px da janela
         tab_measure = tkfont.Font(font=tab_font)
         for name, label in tabs:
-            btn = ctk.CTkButton(tabbar, text=label, height=30, corner_radius=8,
-                                width=tab_measure.measure(label) + 28,
+            btn = ctk.CTkButton(tabbar, text=label, height=30, corner_radius=6,
+                                width=tab_measure.measure(label) + 16,
                                 fg_color="transparent", hover_color=SURFACE_2,
                                 text_color=INK_3, font=tab_font,
                                 command=lambda n=name: self._show_tab(n))
-            btn.pack(side="left", padx=(0, 4))
+            btn.pack(side="left", padx=(0, 2))
             self.tab_btns[name] = btn
 
         # status empacotado antes do conteudo (side=bottom) pra nunca ser espremido pra fora
@@ -2879,6 +2920,10 @@ class App:
             self._tabs["omarchy"] = self._build_devices_tab()
         self.compare_panel = ComparisonPanel(self.content, self, StreamResampler)
         self._tabs["comparar"] = self.compare_panel
+        self.meeting_panel = None
+        if not IS_WIN:
+            self.meeting_panel = MeetingPanel(self.content, self)
+            self._tabs["reuniao"] = self.meeting_panel
         root.protocol("WM_DELETE_WINDOW", self._close)
         self._tab = None
         self._show_tab("historico")
@@ -2910,6 +2955,8 @@ class App:
 
     def _close(self):
         self.compare_panel.close()
+        if self.meeting_panel is not None:
+            self.meeting_panel.close()
         self.root.destroy()
 
     # -- abas / historico ----------------------------------------------------
@@ -2925,12 +2972,19 @@ class App:
             self._geom_antes = None
         if name == self._tab:
             return
-        if name == "comparar":
+        # abas de tela cheia: sem a faixa do GRAVAR e sem o card de configuracao do ditado
+        full = ("comparar", "reuniao")
+        if name in full and self._tab not in full:
             self.command_bar.pack_forget()
             self.config_card.pack_forget()
-        elif self._tab == "comparar":
+        elif name not in full and self._tab in full:
             self.config_card.pack(fill="x", padx=self.PADX, pady=(0, 12), before=self.tabbar)
             self.command_bar.pack(fill="x", padx=self.PADX, pady=(0, 12), before=self.config_card)
+        if self.meeting_panel is not None:
+            if name == "reuniao":
+                self.meeting_panel.shown()
+            elif self._tab == "reuniao":
+                self.meeting_panel.hidden()
         self._tab = name
         for n, btn in self.tab_btns.items():
             if n == name:
@@ -3576,6 +3630,9 @@ class App:
                     if _wants_enter(payload):
                         self.transcriber.arm_auto_enter()
                     self._stop()
+                elif event == "meeting":
+                    if self.meeting_panel is not None:
+                        self.meeting_panel.command(payload)
                 elif event == "toggle":
                     if self.transcriber.recording.is_set():
                         if _wants_enter(payload):

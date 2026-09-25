@@ -9,7 +9,10 @@ IS_WIN = sys.platform == "win32"
 def _prepare_cuda_libs():
     """Expõe cublas/cudnn do wheel NVIDIA ao carregador nativo (DLL no Windows, .so no Linux)."""
     dirs = []
-    for name in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"):
+    # cublas/cudnn/nvrtc: CTranslate2 (Whisper). runtime/cufft/curand/nvjitlink: onnxruntime-gpu
+    # (Parakeet e diarizacao). Pacote ausente e so pulado: instalacao so-Whisper segue valendo.
+    for name in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc", "nvidia.cuda_runtime",
+                 "nvidia.nvjitlink", "nvidia.cufft", "nvidia.curand"):
         try:
             mod = __import__(name, fromlist=["*"])
         except ImportError:
@@ -32,7 +35,7 @@ def _prepare_cuda_libs():
                 / f"python{sys.version_info.major}.{sys.version_info.minor}"
                 / "site-packages" / "nvidia"
             )
-        for pkg in ("cublas", "cudnn", "cuda_nvrtc"):
+        for pkg in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime", "nvjitlink", "cufft", "curand"):
             for sub in ("bin", "lib", "lib64"):
                 d = nvidia / pkg / sub
                 if d.is_dir():

@@ -1,0 +1,3 @@
+# O faster-whisper depende de onnxruntime (CPU); na instalacao CUDA quem fornece o modulo
+# e o onnxruntime-gpu (que tambem roda na CPU o VAD do Silero). Marcador sempre falso = remove.
+onnxruntime ; sys_platform == "never"

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import app
-from sussurro_models import ModelConfig, normalize_model_settings, resolve_model_config, model_path
+from sussurro_models import PARAKEET, ModelConfig, normalize_model_settings, resolve_model_config, model_path
 
 
 class ModelSettingsTests(unittest.TestCase):
@@ -192,3 +192,62 @@ class ModelCacheTests(unittest.TestCase):
         from huggingface_hub.errors import LocalEntryNotFoundError
         download = Mock(side_effect=[LocalEntryNotFoundError('missing'), '/downloaded'])
         self.assertEqual(model_path('base', download), '/downloaded')
+
+
+class ParakeetTests(unittest.TestCase):
+    def backend(self, cuda=1):
+        return SimpleNamespace(get_cuda_device_count=Mock(return_value=cuda),
+                               get_supported_compute_types=Mock(return_value={'int8_float16'}))
+
+    def test_parakeet_runs_on_gpu_in_fp16(self):
+        config = resolve_model_config({'whisper_model': PARAKEET, 'whisper_device': 'auto'}, self.backend())
+        self.assertEqual(config, ModelConfig(PARAKEET, 'cuda', 'float16'))
+        self.assertEqual(config.engine, 'parakeet')
+        self.assertEqual(ModelConfig('large-v3', 'cuda', 'int8_float16').engine, 'whisper')
+
+    def test_parakeet_refuses_cpu(self):
+        with self.assertRaisesRegex(RuntimeError, 'GPU'):
+            resolve_model_config({'whisper_model': PARAKEET, 'whisper_device': 'cpu'}, self.backend())
+        with self.assertRaisesRegex(RuntimeError, 'GPU'):
+            resolve_model_config({'whisper_model': PARAKEET, 'whisper_device': 'auto'}, self.backend(0))
+
+    def test_tokens_become_words_with_times(self):
+        from sussurro_parakeet import words_from_tokens
+        words = words_from_tokens([' No', ' Da', 'ily', ' W', 'ork', ','], [0.08, 0.32, 0.48, 0.72, 0.8, 0.96],
+                                  [0.0] * 6, offset=10.0, end=11.2)
+        self.assertEqual([w.word for w in words], [' No', ' Daily', ' Work,'])
+        self.assertAlmostEqual(words[1].start, 10.32)
+        self.assertAlmostEqual(words[1].end, 10.72)
+        self.assertAlmostEqual(words[2].end, 11.04)
+
+    def test_batches_bound_padded_audio(self):
+        from sussurro_parakeet import batches, SAMPLE_RATE, BATCH_SECONDS
+        chunks = [(0, s * SAMPLE_RATE) for s in (30, 2, 29, 5, 1, 30, 12)]
+        groups = list(batches(chunks))
+        self.assertEqual(sorted(i for g in groups for i in g), list(range(len(chunks))))
+        for g in groups:
+            longest = max(chunks[i][1] for i in g)
+            self.assertTrue(len(g) == 1 or longest * len(g) <= BATCH_SECONDS * SAMPLE_RATE)
+
+    def test_adapter_offsets_segments_and_skips_empty(self):
+        import numpy as np
+        import sussurro_parakeet as pk
+        result = lambda text, tokens, times: SimpleNamespace(text=text, tokens=tokens, timestamps=times,
+                                                             logprobs=[0.0] * len(tokens))
+        model = pk.ParakeetModel.__new__(pk.ParakeetModel)
+        model._asr = SimpleNamespace(recognize=lambda chunks: [
+            result('Oi.', [' Oi', '.'], [0.1, 0.3]) if c.size > pk.SAMPLE_RATE else result('', [], [])
+            for c in chunks])
+        audio = np.zeros(pk.SAMPLE_RATE * 6, dtype=np.float32)
+        spans = [(0, pk.SAMPLE_RATE // 2), (2 * pk.SAMPLE_RATE, 4 * pk.SAMPLE_RATE)]
+        with patch.object(pk, 'speech_chunks', return_value=spans):
+            segments, info = model.transcribe(audio, language='pt', vad_filter=True, word_timestamps=True)
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].text, ' Oi.')
+        self.assertAlmostEqual(segments[0].start, 2.1)
+        self.assertEqual([w.word for w in segments[0].words], [' Oi.'])
+        self.assertEqual(info.duration, 6)
+
+    def test_neighbouring_speech_shares_one_window(self):
+        from sussurro_parakeet import merge_spans
+        self.assertEqual(merge_spans([(0, 5), (7, 12), (14, 30), (31, 33)], 20), [(0, 12), (14, 33)])

@@ -16,18 +16,8 @@ MAX_SECONDS = 30
 
 def comparison_temp_root() -> Path:
     """Use the app cache instead of the quota-limited shared system temp."""
-    override = os.environ.get('SUSSURRO_CACHE_DIR')
-    if override:
-        root = Path(override).expanduser()
-    elif os.name == 'nt':
-        local = os.environ.get('LOCALAPPDATA')
-        root = Path(local) / 'Sussurro' if local else Path.home() / 'AppData' / 'Local' / 'Sussurro'
-    else:
-        xdg = os.environ.get('XDG_CACHE_HOME')
-        root = Path(xdg).expanduser() / 'sussurro' if xdg else Path.home() / '.cache' / 'sussurro'
-    root = root / 'compare'
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return root
+    from sussurro_models import cache_dir
+    return cache_dir('compare')
 
 
 class ClipRecorder:
@@ -224,14 +214,21 @@ def worker(model_name, device, language, path):
         from sussurro_models import resolve_model_config, model_path
         config = resolve_model_config({'whisper_model': model_name, 'whisper_device': device})
         emit(event='stage', stage='Baixando ou lendo cache...')
-        weights = model_path(model_name, download_model)
+        if config.engine == 'parakeet':
+            import sussurro_parakeet
+            weights = sussurro_parakeet.model_dir()
+        else:
+            weights = model_path(model_name, download_model)
         with wave.open(path) as wav:
             assert wav.getframerate() == SAMPLE_RATE and wav.getnchannels() == 1 and wav.getsampwidth() == 2
             audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2').astype(np.float32) / 32768
         prep_s = time.perf_counter() - prep_start
         emit(event='stage', stage='Carregando e aquecendo...')
         start = time.perf_counter()
-        model = WhisperModel(weights, device=config.device, compute_type=config.compute_type)
+        if config.engine == 'parakeet':
+            model = sussurro_parakeet.ParakeetModel(weights)
+        else:
+            model = WhisperModel(weights, device=config.device, compute_type=config.compute_type)
         segments, _ = model.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32),
                                       language='pt', beam_size=5, vad_filter=False)
         list(segments)
