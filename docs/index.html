@@ -144,7 +144,7 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
   <div class="pillars">
     <div class="card reveal"><div class="dot"></div><h3>100% local</h3><p>Whisper com modelo selecionável, na CPU ou GPU. Sem conta, sem nuvem, sem limite de palavras.</p></div>
     <div class="card reveal"><div class="dot"></div><h3>Grátis e aberto</h3><p>Código no GitHub sob licença MIT. Sem assinatura, sem versão Pro, sem pegadinha.</p></div>
-    <div class="card reveal"><div class="dot"></div><h3>Feito pra escrever</h3><p>Transcrição simultânea, colagem no app que estiver em foco, biblioteca de termos e histórico com áudio.</p></div>
+    <div class="card reveal"><div class="dot"></div><h3>Feito pra escrever</h3><p>Transcrição simultânea, colagem no app que estiver em foco, biblioteca de termos, histórico com áudio e reuniões transcritas com quem falou o quê.</p></div>
   </div>
 
   <section id="elon">
@@ -208,10 +208,19 @@ footer{margin-top:96px;padding:40px 0 60px;border-top:1px solid var(--bd);color:
       <div class="shot reveal"><img src="media/tab-estatisticas.png" alt="Aba Estatísticas do Sussurro"></div>
     </div>
 
+    <div class="feat rev">
+      <div>
+        <h3>Reuniões com quem falou o quê</h3>
+        <p>A aba Reunião grava seu microfone e o áudio do PC em trilhas separadas e, ao parar, transcreve tudo na GPU. Funciona com qualquer app de chamada: nenhum bot entra na call e nada sai da máquina. No Linux.</p>
+        <ul><li>Você de um lado, os outros do outro, e várias vozes do mesmo lado separadas pelo Nemotron da NVIDIA</li><li>Renomeie falantes, clique numa linha pra ouvir dali e copie em Markdown</li><li>Importa qualquer arquivo de áudio, e cada reunião vira uma pasta com áudio e transcrição</li></ul>
+      </div>
+      <div class="shot reveal"><img src="media/tab-reuniao.png" alt="Aba Reunião do Sussurro com uma conversa transcrita e os falantes Ana e Rafa"></div>
+    </div>
+
     <div class="nums">
       <div class="num reveal"><b>~1,2 s</b><span>do fim da fala ao texto colado, num trecho de 30 s (RTX 4070 Ti Super)</span></div>
       <div class="num reveal"><b>0</b><span>bytes de áudio enviados pra fora da sua máquina</span></div>
-      <div class="num reveal"><b>Turbo</b><span>padrão na GPU; Base na CPU; seis modelos à escolha</span></div>
+      <div class="num reveal"><b>Turbo</b><span>padrão na GPU; Base na CPU; sete modelos à escolha, Parakeet da NVIDIA incluso</span></div>
       <div class="num reveal"><b>MIT</b><span>licença. Use, modifique, redistribua</span></div>
     </div>
   </section>
@@ -258,6 +267,9 @@ git clone https://github.com/LucasOl1337/sussurro
 cd sussurro
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-cuda.txt
+<span class="c"># onnxruntime na GPU pro Parakeet e as reuniões</span>
+.venv/bin/pip uninstall -y onnxruntime onnxruntime-gpu
+.venv/bin/pip install --no-deps onnxruntime-gpu==1.24.4
 
 <span class="c"># rode</span>
 .venv/bin/python app.py</pre></div>
@@ -270,7 +282,7 @@ python -m venv .venv
 <span class="c">:: rode</span>
 .venv\Scripts\python app.py</pre></div>
     </div>
-    <p class="foot-note">No Wayland, instale <code>wl-clipboard</code> e <code>wtype</code> pra colar. As regras de janela do Hyprland e a regra udev do headset estão em <a href="https://github.com/LucasOl1337/sussurro/tree/main/contrib/omarchy">contrib/omarchy</a>.</p>
+    <p class="foot-note">No Wayland, instale <code>wl-clipboard</code> e <code>wtype</code> pra colar. As reuniões pedem <code>ffmpeg</code> e <code>parec</code>/<code>pacat</code> (libpulse). As regras de janela do Hyprland e a regra udev do headset estão em <a href="https://github.com/LucasOl1337/sussurro/tree/main/contrib/omarchy">contrib/omarchy</a>.</p>
   </section>
 
   <footer>

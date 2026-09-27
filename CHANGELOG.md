@@ -4,6 +4,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+## [0.6.0] — 2026-09-27
+
 ### Adicionado
 
 - Aba REUNIÃO (Linux): grava o microfone e o áudio do PC em duas trilhas, transcreve cada lado na GPU com o modelo do ditado e separa várias vozes do mesmo lado com o Nemotron 3 Diarization. Eco dos outros no microfone fica de fora, falantes podem ser renomeados, a transcrição toca a partir de qualquer linha e sai em Markdown numa pasta por reunião. Importa qualquer arquivo de áudio e recupera a gravação se o app cair. Portado do Meeting Recorder de Jankees van Woezik (MIT).
