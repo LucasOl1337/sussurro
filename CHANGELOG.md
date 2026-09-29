@@ -4,6 +4,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- Botão **Refazer** em todos os ditados do histórico, com escolha de motor/modelo, dispositivo e idioma só para aquela tentativa. Reutiliza o WAV salvo, atualiza a mesma entrada e restaura o modelo habitual ao terminar. Se houver erro, mantém o texto anterior disponível para copiar.
+
 ## [0.6.0] — 2026-09-27
 
 ### Adicionado

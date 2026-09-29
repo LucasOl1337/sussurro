@@ -60,6 +60,7 @@ import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from sussurro_compare_ui import ComparisonPanel
+from sussurro_history_ui import RetranscribeDialog
 if not IS_WIN:
     from sussurro_meeting_ui import MeetingPanel
 import sounddevice as sd
@@ -956,28 +957,33 @@ class Transcriber:
                             or self.recording.is_set() or not self._drained or self._retrying.is_set()):
                         raise RuntimeError("Aguarde o trabalho atual terminar antes de trocar o modelo.")
                 config = resolve_model_config(settings or DEFAULT_MODEL_SETTINGS)
-                self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
-                # Network failure leaves the current model usable.
-                path = self._weights(config)
-                previous = self.model_config
-                if previous is not None and previous.engine == "parakeet" and self.model is not None:
-                    self.model.close()  # sessoes do onnxruntime nao somem so com gc
-                self.model = None
-                self.model_config = None
-                gc.collect()
-                try:
-                    self._load_model_config(config, path)
-                except Exception:
-                    # Do not hold two models in VRAM. Recover from the local cache only.
-                    if previous is not None:
-                        try:
-                            self._load_model_config(previous, self._weights(previous, local_only=True))
-                        except Exception:
-                            self.model = None
-                            self.model_config = None
-                    raise
+                self._replace_model_locked(config)
         finally:
             self.model_loading.clear()
+
+    def _clear_model_locked(self):
+        if self.model_config is not None and self.model_config.engine == "parakeet" and self.model is not None:
+            self.model.close()  # sessoes do onnxruntime nao somem so com gc
+        self.model = None
+        self.model_config = None
+        gc.collect()
+
+    def _replace_model_locked(self, config):
+        """Chamador segura _model_lock; nunca mantem dois modelos na VRAM."""
+        self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
+        path = self._weights(config)  # falha no download preserva o modelo atual
+        previous = self.model_config
+        self._clear_model_locked()
+        try:
+            self._load_model_config(config, path)
+        except Exception:
+            if previous is not None:
+                try:
+                    self._load_model_config(previous, self._weights(previous, local_only=True))
+                except Exception:
+                    self.model = None
+                    self.model_config = None
+            raise
 
     def _weights(self, config, local_only=False):
         if config.engine == "parakeet":
@@ -1225,6 +1231,8 @@ class Transcriber:
                 raise RuntimeError("O modelo ainda esta carregando.")
             if self.comparing.is_set():
                 raise RuntimeError("Comparacao de modelos em andamento.")
+            if self._retrying.is_set():
+                raise RuntimeError("Aguarde a transcricao do historico terminar.")
             self._meeting_jobs += 1
 
     def end_meeting_job(self):
@@ -1401,22 +1409,36 @@ class Transcriber:
                 if deve_baixar and sid == self._session_id:
                     self._pending_done()
 
-    def _transcribe_locked(self, audio, *, language, vad_filter):
+    def _transcribe_locked(self, audio, *, language, vad_filter, config=None):
         """Inferencia serializada: o ditado e a transcricao de arquivo (IPC) dividem um
         unico modelo na GPU, entao duas chamadas simultaneas competem pela mesma VRAM.
 
         hotwords enviesa a decodificacao pros termos da Biblioteca: e o que evita o
         whisper inventar "Nightingale" no lugar de "9router". Consome o gerador aqui
-        dentro para a inferencia acontecer com o lock ainda tomado.
+        dentro para a inferencia acontecer com o lock ainda tomado. Quando config
+        e informado, usa esse modelo so nesta chamada e restaura o anterior.
         """
         with self._model_lock:
             if self.model_loading.is_set() or self.model is None:
                 raise RuntimeError("Modelo indisponivel ou sendo trocado. Tente novamente quando estiver pronto.")
-            segments, info = self.model.transcribe(
-                audio, language=language, beam_size=5, vad_filter=vad_filter,
-                hotwords=self.library.hotwords,
-            )
-            return drop_hallucinations(list(segments), audio), info
+            previous = self.model_config
+            temporary = config is not None and config != previous
+            if temporary:
+                self._replace_model_locked(config)
+            try:
+                segments, info = self.model.transcribe(
+                    audio, language=language, beam_size=5, vad_filter=vad_filter,
+                    hotwords=self.library.hotwords,
+                )
+                return drop_hallucinations(list(segments), audio), info
+            finally:
+                if temporary:
+                    self._clear_model_locked()
+                    try:
+                        self._load_model_config(previous, self._weights(previous, local_only=True))
+                    except Exception as error:
+                        raise RuntimeError("Nao foi possivel restaurar o modelo do ditado. "
+                                           "Clique em Aplicar modelo para carrega-lo novamente.") from error
 
     def transcribe_file(self, path: str) -> dict:
         """Transcreve um arquivo de audio e arquiva no historico, sem microfone nem colagem.
@@ -1425,8 +1447,8 @@ class Transcriber:
         audios do WhatsApp. Retorna o mesmo dict que vai pro history.jsonl.
         """
         with self._pending_lock:
-            if self.model_loading.is_set() or self.comparing.is_set():
-                raise RuntimeError("Modelo sendo trocado ou comparacao em andamento; aguarde.")
+            if self.model_loading.is_set() or self.comparing.is_set() or self._retrying.is_set():
+                raise RuntimeError("Modelo ocupado com troca, comparacao ou historico; aguarde.")
             self._file_jobs += 1
         try:
             if self.model is None:
@@ -1510,58 +1532,79 @@ class Transcriber:
             temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
             os.replace(temporary, HISTORY_INDEX)
 
-    def retry_history_async(self, entry: dict) -> None:
-        """Tenta novamente um WAV falho e atualiza o registro existente em background."""
-        if self.model is None:
-            raise RuntimeError("Modelo ainda carregando — aguarde.")
-        if self.busy():
-            raise RuntimeError("Aguarde o trabalho atual terminar.")
+    def retry_history_async(self, entry: dict, selection=None, language=None) -> None:
+        """Refaz qualquer WAV salvo; as escolhas valem so para esta tentativa."""
+        language = self.language if language is None else language
+        if language not in ("pt", "en", "auto"):
+            raise ValueError("Idioma invalido.")
         wav_name = str(entry.get("wav", ""))
         if not wav_name or Path(wav_name).name != wav_name:
             raise ValueError("arquivo de historico invalido")
         path = HISTORY_DIR / wav_name
         if not path.is_file():
-            raise FileNotFoundError(str(path))
-        self._retrying.set()
-        self.status_queue.put("Tentando transcrever o audio novamente...")
-        threading.Thread(target=self._retry_history_worker, args=(dict(entry), path),
-                         name="sussurro-history-retry", daemon=True).start()
+            raise FileNotFoundError("O audio salvo nao foi encontrado. Para refazer, "
+                                    "o WAV precisa estar na pasta do historico.")
+        with self._pending_lock:
+            if self.model is None:
+                raise RuntimeError("Modelo ainda carregando; aguarde.")
+            if (self.recording.is_set() or not self._drained or self._pending or self._file_jobs
+                    or self._meeting_jobs or self._retrying.is_set() or self.comparing.is_set()
+                    or self.model_loading.is_set() or self._model_lock.locked()):
+                raise RuntimeError("Aguarde o trabalho atual terminar.")
+            self._retrying.set()
+        self.status_queue.put("Refazendo a transcricao do audio salvo...")
+        try:
+            threading.Thread(target=self._retry_history_worker,
+                             args=(dict(entry), path, dict(selection) if selection else None, language),
+                             name="sussurro-history-retry", daemon=True).start()
+        except Exception:
+            self._retrying.clear()
+            raise
 
-    def _retry_history_worker(self, entry: dict, path: Path) -> None:
+    def _retry_history_worker(self, entry: dict, path: Path, selection=None, language=None) -> None:
+        result = dict(entry)
+        result.pop("retrying", None)
         try:
             audio = load_audio_16k_mono(path)
             if audio.size == 0:
                 raise ValueError("audio vazio")
             started = time.perf_counter()
-            lang = None if self.language == "auto" else self.language
-            segments, _info = self._transcribe_locked(audio, language=lang, vad_filter=True)
+            language = self.language if language is None else language
+            lang = None if language == "auto" else language
+            config = resolve_model_config(selection) if selection else self.model_config
+            segments, _info = self._transcribe_locked(audio, language=lang, vad_filter=True, config=config)
             text = format_transcript(segments)
             text, fixes = self.library.apply(text)
             if not text:
                 raise ValueError("nenhuma fala reconhecida")
             updated = {**entry, "text": text, "dur": round(audio.size / SAMPLE_RATE, 2),
-                       "fix": fixes}
+                       "fix": fixes, "language": language}
+            if config is not None:
+                updated["model"] = config.model
+                updated["device"] = config.device
             updated.pop("failed", None)
             updated.pop("error", None)
             updated.pop("retrying", None)
+            updated.pop("retry_error", None)
             self._replace_history_entry(updated)
-            self.history_queue.put(updated)
+            result = updated
             _perf("history_retry_done", wav=path.name,
                   audio_s=round(audio.size / SAMPLE_RATE, 3),
                   inference_ms=round((time.perf_counter() - started) * 1000, 1))
-            self.status_queue.put("Audio recuperado e transcrito.")
+            self.status_queue.put("Transcricao refeita e salva no historico.")
         except Exception as e:
             traceback.print_exc()
-            failed = {**entry, "failed": True, "error": f"{type(e).__name__}: {e}"}
-            failed.pop("retrying", None)
+            result["retry_error"] = f"{type(e).__name__}: {e}"
+            if entry.get("failed") or not entry.get("text"):
+                result.update(failed=True, error=result["retry_error"])
             try:
-                self._replace_history_entry(failed)
-                self.history_queue.put(failed)
+                self._replace_history_entry(result)
             except Exception:
                 traceback.print_exc()
-            self.status_queue.put(f"ERRO ao tentar novamente: {e}")
+            self.status_queue.put(f"ERRO ao refazer: {e}. A transcricao anterior foi mantida.")
         finally:
             self._retrying.clear()
+            self.history_queue.put(result)
 
     def _paste(self, text: str):
         """Cola no app focado; no Linux deixa o ditado no clipboard para recolar."""
@@ -2554,10 +2597,13 @@ class HistoryList(ctk.CTkFrame):
                 continue
             px0, py0, px1, py1 = h["play"]
             cx0, cy0, cx1, cy1 = h["copy"]
+            rx0, ry0, rx1, ry1 = h["retry"]
             if px0 <= x <= px1 and py0 <= y <= py1:
                 return h, "play"
             if cx0 <= x <= cx1 and cy0 <= y <= cy1:
                 return h, "copy"
+            if rx0 <= x <= rx1 and ry0 <= y <= ry1:
+                return h, "retry"
             tx0, ty0, tx1, ty1 = h["text"]
             if tx0 <= x <= tx1 and ty0 <= y <= ty1:
                 return h, "text"
@@ -2572,20 +2618,20 @@ class HistoryList(ctk.CTkFrame):
             failed = self._entries[self._hover].get("failed")
             for kind, iid in self._icon_ids.get(self._hover, ()):
                 self.canvas.itemconfigure(
-                    iid, fill=ACCENT_TEXT if (failed and kind == "copy") else INK_3)
+                    iid, fill=ACCENT_TEXT if (failed and kind == "retry") else INK_3)
         self._hover = idx
         if idx is not None and idx in self._bg_ids:
             self.canvas.itemconfigure(self._bg_ids[idx], fill=SURFACE_2)
             failed = self._entries[idx].get("failed")
             for kind, iid in self._icon_ids.get(idx, ()):
                 self.canvas.itemconfigure(
-                    iid, fill=ACCENT_TEXT if (failed and kind == "copy") else INK)
+                    iid, fill=ACCENT_TEXT if (failed and kind == "retry") else INK)
 
     def _on_motion(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         h, zone = self._hit(x, y)
         failed = h is not None and self._entries[h["i"]].get("failed")
-        clickable = zone in ("play", "copy", "text") or (failed and zone == "row")
+        clickable = zone in ("play", "copy", "text", "retry") or (failed and zone == "row")
         self.canvas.configure(cursor="hand2" if clickable else "")
         self._set_hover(None if h is None else h["i"])
 
@@ -2601,9 +2647,9 @@ class HistoryList(ctk.CTkFrame):
         entry = self._entries[h["i"]]
         if zone == "play":
             self.on_play(str(HISTORY_DIR / entry["wav"]))
-        elif entry.get("failed"):
+        elif zone == "retry" or (entry.get("failed") and zone in ("text", "row")):
             self.on_retry(entry)
-        elif zone in ("copy", "text"):
+        elif zone in ("copy", "text") and entry.get("text"):
             self.on_copy(entry["text"])
 
     # -- desenho --------------------------------------------------------------
@@ -2621,7 +2667,8 @@ class HistoryList(ctk.CTkFrame):
         s = self._s
         padx, pady = s(14), s(9)
         btn, gap = s(28), s(2)
-        btns_w = btn * 2 + gap + padx + s(6)
+        retry_w = s(68)
+        btns_w = btn * 2 + retry_w + gap * 2 + padx + s(6)
         y = s(6)
         prev_day = None
         font_day = (self.font_ui, 10, "bold")
@@ -2651,8 +2698,10 @@ class HistoryList(ctk.CTkFrame):
                 prev_day = day
             failed = bool(entry.get("failed"))
             retrying = bool(entry.get("retrying"))
-            shown_text = ("Tentando transcrever novamente..." if retrying else
-                          "A transcrição falhou. Clique para tentar novamente.") if failed else entry["text"]
+            shown_text = ("A transcrição falhou. Clique em Refazer para tentar novamente."
+                          if failed else entry["text"])
+            if retrying:
+                shown_text = "Refazendo transcrição..." + ("\n\n" + entry["text"] if entry.get("text") else "")
             text_x = padx + time_w
             text_w = max(s(80), w - text_x - btns_w)
             tid = self.canvas.create_text(
@@ -2668,7 +2717,9 @@ class HistoryList(ctk.CTkFrame):
             self.canvas.create_text(
                 padx, y + pady + s(2), text=dt.strftime("%H:%M"), fill=INK_3,
                 anchor="nw", font=font_time)
-            copy_x1 = w - padx - s(4)
+            retry_x1 = w - padx - s(4)
+            retry_x0 = retry_x1 - retry_w
+            copy_x1 = retry_x0 - gap
             copy_x0 = copy_x1 - btn
             play_x1 = copy_x0 - gap
             play_x0 = play_x1 - btn
@@ -2678,19 +2729,22 @@ class HistoryList(ctk.CTkFrame):
                 font=font_btn, anchor="center")
             copy_id = self.canvas.create_text(
                 (copy_x0 + copy_x1) / 2, by + btn / 2,
-                text="…" if retrying else ("↻" if failed else "⧉"),
-                fill=ACCENT_TEXT if failed else INK_3,
-                font=font_btn, anchor="center")
+                text="⧉", fill=INK_3, font=font_btn, anchor="center")
+            retry_id = self.canvas.create_text(
+                (retry_x0 + retry_x1) / 2, by + btn / 2,
+                text="…" if retrying else "Refazer", fill=ACCENT_TEXT if failed else INK_3,
+                font=(self.font_ui, 10), anchor="center")
             # separador fino entre ditados; some no ultimo de cada dia
             self.canvas.create_line(padx, y + row_h, w - padx, y + row_h, fill=BORDER)
             self._hits.append({
                 "i": i, "y0": y, "y1": y + row_h,
                 "play": (play_x0, y, play_x1, y + row_h),
                 "copy": (copy_x0, y, copy_x1, y + row_h),
+                "retry": (retry_x0, y, retry_x1, y + row_h),
                 "text": (text_x, y, play_x0 - s(4), y + row_h),
             })
             self._bg_ids[i] = bg
-            self._icon_ids[i] = (("play", play_id), ("copy", copy_id))
+            self._icon_ids[i] = (("play", play_id), ("copy", copy_id), ("retry", retry_id))
             y += row_h + 1
         self._content_h = y + s(10)
         self.canvas.configure(scrollregion=(0, 0, w, self._content_h))
@@ -3020,6 +3074,8 @@ class App:
     def _add_history(self, entry: dict):
         for i, current in enumerate(self.entries):
             if current.get("wav") == entry.get("wav"):
+                if current.get("retrying"):
+                    self._model_load_done({}, False, None)
                 self.entries[i] = entry
                 break
         else:
@@ -3037,12 +3093,18 @@ class App:
     def _retry_entry(self, entry: dict):
         if entry.get("retrying"):
             return
-        try:
-            self.transcriber.retry_history_async(entry)
-        except Exception as e:
-            self.status.configure(text=f"ERRO ao tentar novamente: {e}")
+        dialog = getattr(self, "_retry_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
             return
+        self._retry_dialog = RetranscribeDialog(
+            self, entry, lambda selection, language: self._start_history_retry(entry, selection, language))
+
+    def _start_history_retry(self, entry, selection, language):
+        self.transcriber.retry_history_async(entry, selection, language)
         entry["retrying"] = True
+        self.record_btn.configure(state="disabled")
+        self.apply_model_btn.configure(state="disabled")
         self._render_history()
 
     def _play(self, path: str):
