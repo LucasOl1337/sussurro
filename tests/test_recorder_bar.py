@@ -89,6 +89,28 @@ class RecorderBarTkTests(unittest.TestCase):
         self.cancel.assert_not_called()
         self.confirm.assert_not_called()
 
+    def test_error_notice_renders_reason_and_keeps_cancel_during_recording(self):
+        normal = self.bar._render().tobytes()
+        self.bar.flash('error', 'Microfone parou de enviar áudio.', 2000)
+        self.root.update()
+        self.assertEqual(self.bar._state, 'rec')
+        self.assertIn('Microfone parou', self.bar._feedback[1])
+        self.assertNotEqual(self.bar._render().tobytes(), normal)
+        self.click(self.bar.LX, self.bar.CY)
+        self.cancel.assert_called_once()
+
+    def test_busy_notice_survives_idle_cleanup_then_dismisses_without_cancel(self):
+        self.bar.hide()
+        self.bar.flash('busy', 'Modelo ainda carregando.', 1200)
+        self.bar.finish()
+        self.root.update()
+        self.assertEqual(self.bar._state, 'busy')
+        self.assertTrue(self.bar.win.winfo_ismapped())
+        self.click(self.bar.W // 2, self.bar.CY)
+        self.assertFalse(self.bar.visivel())
+        self.cancel.assert_not_called()
+        self.confirm.assert_not_called()
+
 
 class RecorderBarCancelTests(unittest.TestCase):
     def test_cancel_calls_processing_cancel_and_hides_bar(self):
