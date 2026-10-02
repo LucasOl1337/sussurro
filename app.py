@@ -2118,6 +2118,9 @@ class IpcServer(threading.Thread):
         if verb.lower() == "transcribe":
             return self._handle_transcribe(arg.strip())
         data = data.lower()
+        if data == "cancel":
+            self.event_queue.put(("cancel", None))
+            return "ok\n"
         # "toggle-enter"/"start-enter"/"stop-enter": veio do fone (daemon x9-sussurro);
         # ao terminar de colar, o Sussurro aperta Enter para confirmar o envio.
         base, _, flag = data.partition("-")
@@ -3692,6 +3695,9 @@ class App:
                     if _wants_enter(payload):
                         self.transcriber.arm_auto_enter()
                     self._stop()
+                elif event == "cancel":
+                    if self.transcriber.recording.is_set() or not self.transcriber._drained:
+                        self._cancel()
                 elif event == "meeting":
                     if self.meeting_panel is not None:
                         self.meeting_panel.command(payload)
