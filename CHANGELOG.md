@@ -4,6 +4,10 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- A barra mostra **REUNIAO** com o tempo gravado enquanto uma reunião grava, mesmo fora da aba; pausada, fica cinza e o relógio para. O ditado tem prioridade e a barra volta pra reunião quando ele termina. O indicador não tem X nem confirmar.
+- `sussurro meeting-start|meeting-stop|meeting-pause` espera o painel responder: `ok` quando aplicou, `err` com código de saída 1 quando não (gravação interrompida pendente, nada gravando, painel indisponível ou sem resposta a tempo).
+- Reunião que falha ao iniciar não deixa mais uma "gravação interrompida" falsa bloqueando a próxima.
+
 ## [0.7.0] — 2026-10-02
 
 ### Adicionado

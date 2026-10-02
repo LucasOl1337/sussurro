@@ -278,6 +278,9 @@ class MeetingPanel(ctk.CTkFrame):
             for source in self.sources or ():
                 source.close()
             self.sources = None
+            # sem pendente antes desta tentativa: o que ficou na pasta e so dela, nao uma queda
+            for path in rec.raw_paths():
+                Path(path).unlink(missing_ok=True)
             message = f'ERRO ao iniciar reuniao: {error}'
             self.ready_status.configure(text=message)
             return 'err ' + message.replace('\n', ' ') + '\n'

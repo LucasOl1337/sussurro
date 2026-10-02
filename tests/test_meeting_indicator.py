@@ -92,6 +92,19 @@ class MeetingCommandTests(unittest.TestCase):
         for source in sources:
             source.close.assert_called_once()
 
+    def test_start_failure_does_not_leave_fake_interrupted_recording(self):
+        with tempfile.TemporaryDirectory() as folder:
+            mic, pc, state = (Path(folder) / name for name in ('mic.raw', 'pc.raw', 'estado.json'))
+            panel = self.panel()
+            panel._write_state = lambda: state.write_text('{}', encoding='utf-8')
+            panel.sources[0].start_recording.side_effect = lambda path: Path(path).touch()
+            panel.sources[1].start_recording.side_effect = OSError('parec saiu')
+            with patch.object(meeting_ui.rec, 'raw_paths', return_value=(mic, pc, state)):
+                self.assertTrue(panel.command('start').startswith('err '))
+                self.assertIsNone(meeting_ui.rec.pending_recording())
+                panel.sources = [Mock(), Mock()]
+                self.assertEqual(panel.command('start'), 'ok\n')
+
     def test_start_pause_and_repeated_start_report_state_correctly(self):
         panel = self.panel()
         with patch.object(meeting_ui.rec, 'pending_recording', return_value=None), \
