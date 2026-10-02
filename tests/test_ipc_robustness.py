@@ -149,7 +149,10 @@ class IpcRobustnessTests(unittest.TestCase):
             def close(self):
                 sock.close()
         self.server._sock = Proxy()
-        self.send('status')
+        try:
+            self.send('status')  # so acorda o accept; o servidor pode fechar com a conexao na fila
+        except ConnectionError:
+            pass
         self.thread.join(2)
         self.assertFalse(self.thread.is_alive())
         self.assertTrue(self.path.exists(), 'erro fatal deslinkou o socket')
