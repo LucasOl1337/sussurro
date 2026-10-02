@@ -165,6 +165,8 @@ class HistoryCleanupTests(unittest.TestCase):
             ui = app.App(root)
         ui.transcriber = self.t
         root.update()
+        # Xvfb nao mapeia a janela de teste: simula o canvas ja dimensionado, como no app aberto.
+        ui.hist_frame._on_cfg(SimpleNamespace(width=600))
         button = next(child for child in ui.hist_frame.winfo_children()
                       if isinstance(child, app.ctk.CTkButton) and child.cget('text') == 'Liberar espaço')
         decisions = []
