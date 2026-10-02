@@ -4,7 +4,27 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+## [0.7.0] — 2026-10-02
+
+### Adicionado
+
+- `sussurro cancel` descarta o ditado atual, inclusive enquanto termina de processar, sem colar, arquivar ou apertar Enter. Bind sugerido Super+Shift+Esc em `contrib/omarchy/`.
+- No Linux, fechar a janela esconde a interface e mantém motor e atalhos; `sussurro show` reabre e `sussurro quit` encerra. Abrir o app de novo reabre a instância viva.
+- Sons opcionais de início, fim e erro, desligados por padrão.
+- A barra mostra ocupado ou erro por um instante quando o pedido não pode ser atendido (modelo carregando, outro trabalho, falha).
 - Botão **Refazer** em todos os ditados do histórico, com escolha de motor/modelo, dispositivo e idioma só para aquela tentativa. Reutiliza o WAV salvo, atualiza a mesma entrada e restaura o modelo habitual ao terminar. Se houver erro, mantém o texto anterior disponível para copiar.
+
+### Corrigido
+
+- X, ✓ e arrastar da barra no Hyprland: a regra `SussurroBar` troca `no_focus` (que tirava a janela do hit-test do ponteiro) por `no_follow_mouse`. Exige atualizar a regra local.
+- A colagem vai para a janela onde o ditado começou, e o clique de foco não cai na barra quando o ponteiro está sobre ela.
+- A entrega (colar, Enter, histórico) roda numa fila própria e não segura a transcrição do trecho seguinte.
+- Trecho longo é cortado na última pausa completa detectada pelo VAD, não no meio da frase.
+- Captura que para de mandar áudio gera erro visível e libera o mixer; loopback em silêncio não é confundido com captura morta.
+- Ditado sem texto diz se o microfone não mandou sinal, se o áudio veio baixo demais (RMS < −50 dBFS) ou se a fala não foi reconhecida, e grava o nível do áudio na entrada. `sussurro transcribe` de arquivo sem fala devolve o mesmo diagnóstico sem criar entrada no histórico.
+- Falha CUDA na inferência recarrega o modelo e repete o trecho uma vez antes de pedir nova aplicação.
+- Segunda instância não toma o socket da viva; o servidor IPC sobrevive a clientes que travam ou fecham no meio.
+- Ditado cancelado descarta segmentos pendentes e não entra no histórico.
 
 ## [0.6.0] — 2026-09-27
 

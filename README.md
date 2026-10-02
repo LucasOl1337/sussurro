@@ -2,7 +2,7 @@
 
 Ditado local para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Tudo roda na sua máquina — nenhum áudio sai do computador.
 
-[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.6.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.6.0) · [Changelog](CHANGELOG.md)
+[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.7.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.7.0) · [Changelog](CHANGELOG.md)
 
 O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper **Turbo na GPU ou Base na CPU**, com modelo selecionável**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 
