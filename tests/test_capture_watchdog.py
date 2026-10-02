@@ -35,6 +35,11 @@ class CaptureWatchdogTests(unittest.TestCase):
         data = np.asarray(values, dtype=np.float32).reshape(-1, 1)
         self.callbacks[slot](data, len(data), None, None)
 
+    def audio_item(self, expected_sid=None):
+        sid, audio = self.t._audio_queue.get_nowait()
+        self.assertEqual(sid, self.t._session_id if expected_sid is None else expected_sid)
+        return audio
+
     def mix_tick(self):
         with patch.object(app.time, 'sleep', side_effect=[None, StopIteration]):
             with self.assertRaises(StopIteration):
@@ -45,12 +50,12 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.callback(0)
         self.callback(1, (.3, .4))
         self.mix_tick()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.4, .6])
+        np.testing.assert_allclose(self.audio_item(), [.4, .6])
         self.now += 2.01
         self.callback(1, (.5, .6))
         self.mix_tick()
         self.assertFalse(self.t._audio_queue.empty(), 'slot vivo ficou preso esperando o mic morto')
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.5, .6])
+        np.testing.assert_allclose(self.audio_item(), [.5, .6])
         self.assertEqual(self.t.status_queue.get_nowait(), 'ERRO: microfone parou de enviar áudio')
         self.mix_tick()
         self.assertTrue(self.t.status_queue.empty(), 'erro repetido a cada tick')
@@ -77,7 +82,7 @@ class CaptureWatchdogTests(unittest.TestCase):
             self.now += 1.5
             self.callback(0, (0., 0.))
             self.mix_tick()
-            np.testing.assert_array_equal(self.t._audio_queue.get_nowait(), [0., 0.])
+            np.testing.assert_array_equal(self.audio_item(), [0., 0.])
         self.assertTrue(self.t.status_queue.empty())
 
     def test_no_watchdog_error_after_stop(self):
@@ -87,14 +92,14 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.now += 3.0
         self.mix_tick()
         self.assertTrue(self.t.status_queue.empty())
-        self.assertIsNone(self.t._audio_queue.get_nowait())
+        self.assertIsNone(self.audio_item())
 
     def test_silent_loopback_unblocks_microphone_without_error(self):
         self.start()
         self.now += 2.01
         self.callback(0)
         self.mix_tick()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.1, .2])
+        np.testing.assert_allclose(self.audio_item(), [.1, .2])
         self.assertTrue(self.t.status_queue.empty())
 
     def test_resumed_callback_rejoins_mixing_and_can_timeout_again(self):
@@ -102,14 +107,14 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.now += 2.01
         self.callback(1)
         self.mix_tick()
-        self.t._audio_queue.get_nowait()
+        self.audio_item()
         self.t.status_queue.get_nowait()
         self.callback(0)
         self.mix_tick()
         self.assertTrue(self.t._audio_queue.empty(), 'slot recuperado deve esperar o vizinho vivo')
         self.callback(1, (.3, .4))
         self.mix_tick()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.4, .6])
+        np.testing.assert_allclose(self.audio_item(), [.4, .6])
         self.now += 2.01
         self.callback(1)
         self.mix_tick()
@@ -120,20 +125,21 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.callback(0, (.1, .2, .3))
         self.callback(1, (.4,))
         self.mix_tick()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.5])
+        np.testing.assert_allclose(self.audio_item(), [.5])
         self.now += 2.01
         self.callback(1, (.4, .4, .4))
         self.mix_tick()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.6, .7])
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.4])
+        np.testing.assert_allclose(self.audio_item(), [.6, .7])
+        np.testing.assert_allclose(self.audio_item(), [.4])
         self.callback(1, (.8,))
         self.t.stop()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.8])
-        self.assertIsNone(self.t._audio_queue.get_nowait())
+        np.testing.assert_allclose(self.audio_item(), [.8])
+        self.assertIsNone(self.audio_item())
         self.assertTrue(self.t._audio_queue.empty())
 
     def test_new_session_resets_dead_slots_and_start_deadline(self):
         self.start('microfone')
+        old_sid = self.t._session_id
         self.now += 2.01
         self.mix_tick()
         self.t.status_queue.get_nowait()
@@ -145,7 +151,7 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.start()
         self.callback(1)
         self.mix_tick()
-        self.assertTrue(self.t._audio_queue.get_nowait() is None)
+        self.assertTrue(self.audio_item(expected_sid=old_sid) is None)
         self.assertTrue(self.t._audio_queue.empty())
         self.assertTrue(self.t.status_queue.empty())
 
@@ -189,7 +195,7 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.assertEqual(self.t.status_queue.get_nowait(), 'ERRO: áudio do PC parou de enviar áudio')
         self.callback(0)
         self.mix_tick()
-        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.1, .2])
+        np.testing.assert_allclose(self.audio_item(), [.1, .2])
         self.assertTrue(self.t.status_queue.empty())
 
 

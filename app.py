@@ -29,6 +29,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -930,6 +931,7 @@ class Transcriber:
         self._mix_lock = threading.Lock()
         self._model_lock = threading.Lock()  # serializa ditado e transcricao de arquivo (IPC)
         self._history_lock = threading.Lock()
+        self._session_lock = threading.RLock()  # cancel vs aceite/publicacao do ditado
         self._retrying = threading.Event()
         self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
         self._slot_last_block: list = []
@@ -1081,7 +1083,7 @@ class Transcriber:
                 buf[0] = buf[0][n:]
             np.clip(mixed, -1.0, 1.0, out=mixed)
             self._push_levels(mixed)
-            self._audio_queue.put(mixed)
+            self._audio_queue.put((self._session_id, mixed))
 
     def _push_levels(self, chunk: np.ndarray):
         """RMS em fatias de ~25 ms: e o que a barra de overlay desenha como onda."""
@@ -1243,7 +1245,7 @@ class Transcriber:
         with self._mix_lock:
             self.recording.clear()
             self._drain_mix_locked(flush=True)
-            self._audio_queue.put(None)  # depois do ultimo bloco, inclusive os do mixer
+            self._audio_queue.put((self._session_id, None))  # depois do ultimo bloco do mixer
         streams, self._streams = self._streams, []
         for s in streams:
             s.stop()
@@ -1298,14 +1300,15 @@ class Transcriber:
         """
         if not self.recording.is_set() and not from_processing:
             return
-        self.recording.clear()
-        self._session_id += 1  # tudo que estiver na fila com o id antigo vira lixo
+        with self._mix_lock:
+            self.recording.clear()
+            with self._session_lock:
+                self._session_id += 1  # tudo que estiver na fila com o id antigo vira lixo
+            self._mix_buffers = [[] for _ in self._mix_buffers]
         streams, self._streams = self._streams, []
         for s in streams:
             s.stop()
             s.close()
-        with self._mix_lock:
-            self._mix_buffers = [[] for _ in self._mix_buffers]
         for q in (self._audio_queue, self._segment_queue, self._delivery_queue):
             while True:
                 try:
@@ -1327,6 +1330,7 @@ class Transcriber:
         buffer = np.zeros(0, dtype=np.float32)
         final_blocks = []
         last_check = 0.0
+        buffer_sid = None
         while True:
             item = self._audio_queue.get()
             try:
@@ -1334,6 +1338,14 @@ class Transcriber:
                     buffer = np.zeros(0, dtype=np.float32)
                     final_blocks.clear()
                     continue
+                sid, item = item
+                if sid != self._session_id:
+                    continue
+                if sid != buffer_sid:
+                    buffer = np.zeros(0, dtype=np.float32)
+                    final_blocks.clear()
+                    last_check = 0.0
+                    buffer_sid = sid
                 if item is None:  # fim da gravacao: manda o que sobrou
                     if self._session_mode == "final":
                         buffer = (np.concatenate(final_blocks) if final_blocks
@@ -1344,15 +1356,17 @@ class Transcriber:
                     else:
                         speech = (get_speech_timestamps(buffer, VAD_OPTIONS)
                                   if buffer.size > SAMPLE_RATE // 4 else [])
+                    if sid != self._session_id:
+                        continue
                     if speech:
                         lead_s = speech[0]["start"] / SAMPLE_RATE
-                        self._enqueue_segment(buffer, lead_s)
+                        self._enqueue_segment(buffer, lead_s, sid=sid)
                     elif not self._session_had_speech:
                         self.status_queue.put("Parado (sem fala detectada).")
                     else:
                         self.status_queue.put("Parado.")
                     # marcador de fim de sessao (carimbado: cancelamento o invalida)
-                    self._segment_queue.put((None, None, None, self._session_id, 0.0))
+                    self._segment_queue.put((None, None, None, sid, 0.0))
                     buffer = np.zeros(0, dtype=np.float32)
                     continue
                 if self._session_mode == "final":
@@ -1365,6 +1379,8 @@ class Transcriber:
                 last_check = now
 
                 speech = get_speech_timestamps(buffer, VAD_OPTIONS)
+                if sid != self._session_id:
+                    continue
                 if not speech:
                     if buffer.size > MAX_IDLE_BUFFER_S * SAMPLE_RATE:
                         buffer = buffer[-SAMPLE_RATE:]
@@ -1373,10 +1389,10 @@ class Transcriber:
                 lead_s = speech[0]["start"] / SAMPLE_RATE
                 tail_silence = (buffer.size - last_end) / SAMPLE_RATE
                 if tail_silence >= TAIL_SILENCE_S:
-                    self._enqueue_segment(buffer[:last_end], lead_s)
+                    self._enqueue_segment(buffer[:last_end], lead_s, sid=sid)
                     buffer = buffer[last_end:]
                 elif buffer.size > MAX_SEGMENT_S * SAMPLE_RATE:
-                    self._enqueue_segment(buffer, lead_s)
+                    self._enqueue_segment(buffer, lead_s, sid=sid)
                     buffer = np.zeros(0, dtype=np.float32)
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
@@ -1384,15 +1400,18 @@ class Transcriber:
                 buffer = np.zeros(0, dtype=np.float32)
                 final_blocks.clear()
 
-    def _enqueue_segment(self, audio: np.ndarray, lead_s: float = 0.0):
-        self._session_had_speech = True
-        # O audio pertence ao historico mesmo se o Whisper falhar. Antes ele so
-        # sobrevivia quando a transcricao chegava ate _session_parts.
-        self._session_audio.append(audio)
-        with self._pending_lock:
-            self._pending += 1
-        self._segment_queue.put((audio, self._session_inject, self._session_mode,
-                                 self._session_id, lead_s))
+    def _enqueue_segment(self, audio: np.ndarray, lead_s: float = 0.0, *, sid=None):
+        with self._session_lock:
+            sid = self._session_id if sid is None else sid
+            if sid != self._session_id:
+                return
+            self._session_had_speech = True
+            # O audio pertence ao historico mesmo se o Whisper falhar.
+            self._session_audio.append(audio)
+            with self._pending_lock:
+                self._pending += 1
+            self._segment_queue.put((audio, self._session_inject, self._session_mode,
+                                     sid, lead_s))
 
     # -- transcricao --------------------------------------------------------
     def _transcribe_loop(self):
@@ -1451,7 +1470,7 @@ class Transcriber:
                             self._press_enter(sid)
                         if sid == self._session_id:
                             self._session_auto_enter = False
-                            self._finalize_session()
+                            self._finalize_session(sid=sid)
                     finally:
                         if sid == self._session_id:
                             self._drained = True
@@ -1549,40 +1568,60 @@ class Transcriber:
 
 
     def _archive_audio(self, audio, text: str, fixes: int, started: datetime, *,
-                       failed: bool = False, error: str | None = None) -> dict:
+                       failed: bool = False, error: str | None = None, sid=None) -> dict | None:
         """Grava o WAV e seu registro, inclusive quando a transcricao falhou."""
         HISTORY_DIR.mkdir(exist_ok=True)
         wav_name = started.strftime("%Y%m%d_%H%M%S") + ".wav"
-        with wave.open(str(HISTORY_DIR / wav_name), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(SAMPLE_RATE)
-            w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
-        # dur e fix alimentam a aba ESTATISTICAS; entrada antiga sem eles usa o wav / zero
-        entry = {"ts": started.isoformat(timespec="seconds"), "wav": wav_name,
-                 "text": text, "dur": round(audio.size / SAMPLE_RATE, 2), "fix": fixes}
-        if failed:
-            entry["failed"] = True
-            entry["error"] = error or "Nenhuma fala reconhecida."
-        with self._history_lock:
-            with HISTORY_INDEX.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        self.history_queue.put(entry)
-        return entry
+        temporary = None
+        target = HISTORY_DIR / wav_name
+        if sid is not None:
+            fd, name = tempfile.mkstemp(prefix=".ditado-", suffix=".wav", dir=HISTORY_DIR)
+            os.close(fd)
+            temporary = Path(name)
+        try:
+            with wave.open(str(temporary or target), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+            # Cancel segue livre durante a escrita. So a publicacao e atomica com ele.
+            with self._session_lock:
+                if sid is not None and sid != self._session_id:
+                    return None
+                if temporary is not None:
+                    os.replace(temporary, target)
+                # dur e fix alimentam a aba ESTATISTICAS; entrada antiga usa wav / zero
+                entry = {"ts": started.isoformat(timespec="seconds"), "wav": wav_name,
+                         "text": text, "dur": round(audio.size / SAMPLE_RATE, 2), "fix": fixes}
+                if failed:
+                    entry["failed"] = True
+                    entry["error"] = error or "Nenhuma fala reconhecida."
+                with self._history_lock:
+                    with HISTORY_INDEX.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                self.history_queue.put(entry)
+                return entry
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
-    def _finalize_session(self):
-        parts, self._session_parts = self._session_parts, []
-        audio_parts, self._session_audio = self._session_audio, []
-        errors, self._session_errors = self._session_errors, []
+    def _finalize_session(self, *, sid=None):
+        with self._session_lock:
+            sid = self._session_id if sid is None else sid
+            if sid != self._session_id:
+                return
+            parts, self._session_parts = self._session_parts, []
+            audio_parts, self._session_audio = self._session_audio, []
+            errors, self._session_errors = self._session_errors, []
+            started = self._session_started or datetime.now()
         if not audio_parts:
             return
         text = _join_session_text(parts)
-        started = self._session_started or datetime.now()
         audio = np.concatenate(audio_parts)
         fixes = sum(f for _a, _t, f, *_ in parts)
         failed = bool(errors) or not text
         error = errors[-1] if errors else ("Nenhuma fala reconhecida." if not text else None)
-        self._archive_audio(audio, text, fixes, started, failed=failed, error=error)
+        self._archive_audio(audio, text, fixes, started, failed=failed, error=error, sid=sid)
 
     def _replace_history_entry(self, entry: dict) -> None:
         """Atualiza uma linha pelo nome do WAV sem arriscar truncar o historico."""

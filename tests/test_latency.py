@@ -82,7 +82,8 @@ class LatencyTests(unittest.TestCase):
         t.stop()
         chunks = []
         while True:
-            chunk = t._audio_queue.get_nowait()
+            sid, chunk = t._audio_queue.get_nowait()
+            self.assertEqual(sid, t._session_id)
             if chunk is None:
                 break
             chunks.append(chunk)
@@ -278,7 +279,7 @@ class LatencyTests(unittest.TestCase):
         t = self.transcriber()
         t._session_mode = 'final'
         audio = np.ones(app.SAMPLE_RATE, dtype=np.float32)
-        events = iter([audio, None])
+        events = iter([(t._session_id, audio), (t._session_id, None)])
         t._audio_queue.get = lambda: next(events)
         with patch.object(app, 'get_speech_timestamps') as vad:
             with self.assertRaises(StopIteration):
