@@ -246,3 +246,15 @@ novo depois que o ditado terminar. Exemplo de resposta:
 Uma recusa por ocupação não cria histórico nem altera o status do ditado. Arquivo
 sem fala continua retornando o diagnóstico no JSON, sem criar histórico ou
 status de erro na interface.
+
+## Liberar espaço do histórico
+
+Na aba **HISTÓRICO**, **Liberar espaço** pede uma idade em dias (30 por padrão)
+e mostra quantos WAVs e MiB serão removidos. A confirmação começa em **Não**.
+Só são removidos áudios mais antigos que essa idade e que já tenham texto salvo.
+Áudios sem texto, recentes e arquivos fora do histórico são preservados.
+
+Os textos, datas, estatísticas e correções ficam no histórico. Os itens passam a
+mostrar **Sem áudio** e continuam disponíveis para copiar. Depois da remoção não
+dá pra ouvir ou Refazer esses áudios. A operação é manual, sem limpeza automática,
+e não pode ser desfeita. Pare a reprodução e aguarde trabalhos ativos antes de usar.

@@ -50,6 +50,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+from tkinter import messagebox, simpledialog
 import traceback
 import unicodedata
 import wave
@@ -1728,6 +1729,51 @@ class Transcriber:
             temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
             os.replace(temporary, HISTORY_INDEX)
 
+    def prune_history_audio(self, days: int, *, confirmed: bool = False, now=None, only_files=None) -> dict:
+        """Previa por padrao; apaga so WAV antigo com texto, nunca o indice."""
+        if type(days) is not int or not 1 <= days <= 36500:
+            raise ValueError("Escolha entre 1 e 36500 dias.")
+        cutoff = (now or datetime.now()) - timedelta(days=days)
+        allowed = set(only_files) if only_files is not None else None
+        with self._pending_lock:
+            if (self.recording.is_set() or not self._drained or self._pending or self._file_jobs
+                    or self._meeting_jobs or self._retrying.is_set()):
+                raise RuntimeError("Aguarde o trabalho atual terminar antes de liberar espaço.")
+            with self._history_lock:
+                entries = [json.loads(line) for line in HISTORY_INDEX.read_text(encoding="utf-8").splitlines()
+                           if line.strip()] if HISTORY_INDEX.exists() else []
+                protected = {entry.get("wav") for entry in entries if not entry.get("text", "").strip()}
+                for entry in entries:
+                    try:
+                        if datetime.fromisoformat(entry["ts"]) >= cutoff:
+                            protected.add(entry.get("wav"))
+                    except (KeyError, ValueError, TypeError):
+                        protected.add(entry.get("wav"))
+                result = {"files": [], "bytes": 0, "deleted": 0, "errors": []}
+                for entry in entries:
+                    name = str(entry.get("wav", ""))
+                    if (not name or Path(name).name != name or Path(name).suffix.lower() != ".wav"
+                            or name in protected or name in result["files"]
+                            or (allowed is not None and name not in allowed)):
+                        continue
+                    try:
+                        old = datetime.fromisoformat(entry["ts"]) < cutoff
+                    except (KeyError, ValueError, TypeError):
+                        continue
+                    path = HISTORY_DIR / name
+                    if not old or path.is_symlink() or not path.is_file():
+                        continue
+                    try:
+                        size = path.stat().st_size
+                        if confirmed:
+                            path.unlink()
+                            result["deleted"] += 1
+                        result["files"].append(name)
+                        result["bytes"] += size
+                    except OSError as error:
+                        result["errors"].append(f"{name}: {error}")
+                return result
+
     def retry_history_async(self, entry: dict, selection=None, language=None) -> None:
         """Refaz qualquer WAV salvo; as escolhas valem so para esta tentativa."""
         language = self.language if language is None else language
@@ -2970,10 +3016,13 @@ class HistoryList(ctk.CTkFrame):
                 prev_day = day
             failed = bool(entry.get("failed"))
             retrying = bool(entry.get("retrying"))
+            audio_removed = bool(entry.get("audio_removed"))
             shown_text = ("A transcrição falhou. Clique em Refazer para tentar novamente."
                           if failed else entry["text"])
             if retrying:
                 shown_text = "Refazendo transcrição..." + ("\n\n" + entry["text"] if entry.get("text") else "")
+            elif audio_removed:
+                shown_text += "\nÁudio removido. Texto mantido."
             text_x = padx + time_w
             text_w = max(s(80), w - text_x - btns_w)
             tid = self.canvas.create_text(
@@ -2997,14 +3046,14 @@ class HistoryList(ctk.CTkFrame):
             play_x0 = play_x1 - btn
             by = y + pady
             play_id = self.canvas.create_text(
-                (play_x0 + play_x1) / 2, by + btn / 2, text="▶", fill=INK_3,
+                (play_x0 + play_x1) / 2, by + btn / 2, text="·" if audio_removed else "▶", fill=INK_3,
                 font=font_btn, anchor="center")
             copy_id = self.canvas.create_text(
                 (copy_x0 + copy_x1) / 2, by + btn / 2,
                 text="⧉", fill=INK_3, font=font_btn, anchor="center")
             retry_id = self.canvas.create_text(
                 (retry_x0 + retry_x1) / 2, by + btn / 2,
-                text="…" if retrying else "Refazer", fill=ACCENT_TEXT if failed else INK_3,
+                text="Sem áudio" if audio_removed else ("…" if retrying else "Refazer"), fill=ACCENT_TEXT if failed else INK_3,
                 font=(self.font_ui, 10), anchor="center")
             # separador fino entre ditados; some no ultimo de cada dia
             self.canvas.create_line(padx, y + row_h, w - padx, y + row_h, fill=BORDER)
@@ -3239,6 +3288,8 @@ class App:
             self.content, font_mono=self.FONT_MONO, font_ui=self.FONT_UI,
             day_label=self._day_label, on_play=self._play, on_copy=self._copy_entry,
             on_retry=self._retry_entry)
+        self._secondary(self.hist_frame, "Liberar espaço", self._prune_history_audio).grid(
+            row=1, column=0, columnspan=2, sticky="e", padx=14, pady=(4, 8))
         self.text = ctk.CTkTextbox(self.content, fg_color="transparent", text_color=INK,
                                    font=(self.FONT_UI, 13), wrap="word", border_width=0)
         self.library = self.transcriber.library
@@ -3370,7 +3421,9 @@ class App:
         return "HOJE" if dt.date() == date.today() else dt.strftime("%d/%m/%Y")
 
     def _render_history(self):
-        self.hist_frame.set_entries(self.entries[:HIST_RENDER_MAX])
+        shown = [{**entry, "audio_removed": not (HISTORY_DIR / entry["wav"]).is_file()}
+                 for entry in self.entries[:HIST_RENDER_MAX]]
+        self.hist_frame.set_entries(shown)
 
     def _add_history(self, entry: dict):
         for i, current in enumerate(self.entries):
@@ -3381,7 +3434,7 @@ class App:
                 break
         else:
             self.entries.insert(0, entry)
-        self.hist_frame.set_entries(self.entries[:HIST_RENDER_MAX])
+        self._render_history()
         self._stats_dirty = True
         if self._tab == "estatisticas":
             self._render_stats()
@@ -3392,6 +3445,9 @@ class App:
         self.status.configure(text="Transcricao copiada para a area de transferencia.")
 
     def _retry_entry(self, entry: dict):
+        if not (HISTORY_DIR / entry["wav"]).is_file():
+            self.status.configure(text="Áudio não disponível. O texto do histórico foi mantido.")
+            return
         if entry.get("retrying"):
             return
         dialog = getattr(self, "_retry_dialog", None)
@@ -3409,6 +3465,9 @@ class App:
         self._render_history()
 
     def _play(self, path: str):
+        if not Path(path).is_file():
+            self.status.configure(text="Áudio não disponível. O texto do histórico foi mantido.")
+            return
         if self._playing == path:
             sd.stop()
             self._playing = None
@@ -3422,6 +3481,35 @@ class App:
             audio = audio.reshape(-1, nch)
         sd.play(audio, sr)
         self._playing = path
+
+    def _prune_history_audio(self):
+        if self._playing is not None:
+            self.status.configure(text="Pare a reprodução antes de liberar espaço.")
+            return
+        days = simpledialog.askinteger("Liberar espaço", "Apagar áudio de ditados com texto com mais de quantos dias?",
+                                      initialvalue=30, minvalue=1, maxvalue=36500, parent=self.root)
+        if days is None:
+            return
+        try:
+            preview = self.transcriber.prune_history_audio(days)
+            if not preview["files"]:
+                self.status.configure(text="Nenhum áudio antigo com texto para remover.")
+                return
+            if not messagebox.askyesno(
+                    "Apagar áudio antigo?",
+                    f"Apagar {len(preview['files'])} WAVs com mais de {days} dias "
+                    f"({preview['bytes'] / 1024 / 1024:.1f} MiB)?\n\n"
+                    "Os textos ficam no histórico. Não será possível ouvir ou Refazer esses áudios.\n"
+                    "Áudio sem texto é preservado. Esta remoção não pode ser desfeita.",
+                    parent=self.root, default=messagebox.NO):
+                return
+            result = self.transcriber.prune_history_audio(days, confirmed=True, only_files=preview["files"])
+        except Exception as error:
+            self.status.configure(text=f"Não foi possível liberar espaço: {error}")
+            return
+        self.status.configure(text=f"{result['deleted']} áudios removidos, {result['bytes'] / 1024 / 1024:.1f} MiB liberados. "
+                                   "Textos mantidos." + (f" {len(result['errors'])} falhas ao apagar." if result["errors"] else ""))
+        self._render_history()
 
     # -- estatisticas --------------------------------------------------------
     def _fit_stats_window(self):
