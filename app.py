@@ -1631,8 +1631,8 @@ class Transcriber:
             text = format_transcript(segments)
             text, fixes = self.library.apply(text)
             if not text:
-                entry = self._archive_audio(audio, text, fixes, datetime.now(), failed=True)
-                raise ValueError(entry["error"])
+                _level, diagnosis = self._audio_diagnosis(audio)
+                raise ValueError(diagnosis)
             entry = self._archive_audio(audio, text, fixes, datetime.now())
             _perf("file_done", source=src.name, audio_s=round(audio.size / SAMPLE_RATE, 3),
                   inference_ms=round((time.perf_counter() - t0) * 1000, 1))
@@ -1681,7 +1681,7 @@ class Transcriber:
                     with HISTORY_INDEX.open("a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 self.history_queue.put(entry)
-                if failed:
+                if failed and sid is not None:
                     self.status_queue.put(f"ERRO: {error}")
                 return entry
         finally:

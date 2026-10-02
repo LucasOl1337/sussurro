@@ -69,7 +69,7 @@ class AudioDiagnosisTests(unittest.TestCase):
         self.assertGreater(entry['audio_level']['rms'], .05)
         self.assertTrue(any(status.startswith('ERRO:') for status in self.t.status_queue.queue))
 
-    def test_empty_file_result_is_archived_with_diagnosis(self):
+    def test_empty_file_result_raises_diagnosis_without_history_or_status(self):
         source = self.folder / 'input.wav'
         source.write_bytes(b'mocked decoder input')
         audio = np.zeros(app.SAMPLE_RATE, dtype=np.float32)
@@ -77,10 +77,10 @@ class AudioDiagnosisTests(unittest.TestCase):
              patch.object(self.t, '_transcribe_locked', return_value=([], None)):
             with self.assertRaisesRegex(ValueError, 'Microfone não enviou sinal'):
                 self.t.transcribe_file(str(source))
-        entry = self.t.history_queue.get_nowait()
-        self.assertTrue(entry['failed'])
-        self.assertEqual(entry['audio_level'], {'peak': 0., 'rms': 0.})
-        self.assertTrue((self.folder / entry['wav']).is_file())
+        self.assertTrue(self.t.history_queue.empty())
+        self.assertTrue(self.t.status_queue.empty())
+        self.assertFalse(app.HISTORY_INDEX.exists())
+        self.assertEqual(list(self.folder.glob('*.wav')), [source])
         self.assertEqual(self.t._file_jobs, 0)
 
     def test_normal_session_retains_old_entry_shape_and_status(self):
@@ -106,7 +106,7 @@ class AudioDiagnosisTests(unittest.TestCase):
         self.assertEqual(app.compute_stats([{**normal, 'audio_level': {'peak': .1, 'rms': .05}}]),
                          app.compute_stats([normal]))
 
-    def test_public_file_decode_real_pcm_and_save_diagnostic_levels(self):
+    def test_public_file_decode_real_pcm_diagnoses_without_archive_or_status(self):
         source = self.folder / 'quiet.wav'
         pcm = np.full(app.SAMPLE_RATE, 32, dtype=np.int16)
         with wave.open(str(source), 'wb') as wav:
@@ -117,12 +117,10 @@ class AudioDiagnosisTests(unittest.TestCase):
         with patch.object(self.t, '_transcribe_locked', return_value=([], None)):
             with self.assertRaisesRegex(ValueError, 'Áudio muito baixo'):
                 self.t.transcribe_file(str(source))
-        entry = self.t.history_queue.get_nowait()
-        self.assertAlmostEqual(entry['audio_level']['rms'], 32 / 32768, places=7)
-        self.assertAlmostEqual(entry['audio_level']['peak'], 32 / 32768, places=7)
-        self.assertEqual(entry['error'], 'Áudio muito baixo.')
-        self.assertEqual(json.loads(app.HISTORY_INDEX.read_text()), entry)
-        self.assertTrue((self.folder / entry['wav']).is_file())
+        self.assertTrue(self.t.history_queue.empty())
+        self.assertTrue(self.t.status_queue.empty())
+        self.assertFalse(app.HISTORY_INDEX.exists())
+        self.assertEqual(list(self.folder.glob('*.wav')), [source])
 
     def test_retry_empty_failed_legacy_entry_gains_levels_without_altering_wav(self):
         audio = np.zeros(app.SAMPLE_RATE, dtype=np.float32)
@@ -163,6 +161,13 @@ class AudioDiagnosisTests(unittest.TestCase):
         self.assertEqual(entry['text'], 'texto normal')
         self.assertEqual(self.t._file_jobs, 0)
         self.assertFalse(any(status.startswith('ERRO') for status in self.t.status_queue.queue))
+
+    def test_failed_archive_without_dictation_sid_does_not_emit_error_status(self):
+        audio = np.zeros(app.SAMPLE_RATE, dtype=np.float32)
+        entry = self.t._archive_audio(audio, '', 0, app.datetime(2026, 10, 2, 10, 2), failed=True)
+        self.assertTrue(entry['failed'])
+        self.assertEqual(entry['audio_level'], {'peak': 0., 'rms': 0.})
+        self.assertTrue(self.t.status_queue.empty())
 
 
 if __name__ == '__main__':
