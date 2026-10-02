@@ -927,6 +927,9 @@ class Transcriber:
         self._history_lock = threading.Lock()
         self._retrying = threading.Event()
         self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
+        self._slot_last_block: list = []
+        self._slot_labels: list = []
+        self._dead_slots: set = set()
         self._session_inject = False
         self._session_mode = "simultaneo"
         self._session_had_speech = False
@@ -1030,7 +1033,9 @@ class Transcriber:
             res = self._resamplers[slot]
             data = res.process(mono) if res else mono.copy()
             with self._mix_lock:
-                if self.recording.is_set():
+                if self.recording.is_set() and data.size:
+                    self._slot_last_block[slot] = time.monotonic()
+                    self._dead_slots.discard(slot)
                     self._mix_buffers[slot].append(data)
 
         return cb
@@ -1039,6 +1044,13 @@ class Transcriber:
         while True:
             time.sleep(0.01)
             with self._mix_lock:
+                if self.recording.is_set():
+                    now = time.monotonic()
+                    for slot, last in enumerate(self._slot_last_block):
+                        if now - last > 2.0 and slot not in self._dead_slots:
+                            self._dead_slots.add(slot)
+                            self.status_queue.put(
+                                f"ERRO: {self._slot_labels[slot]} parou de enviar áudio")
                 self._drain_mix_locked()
 
     def _drain_mix_locked(self, flush: bool = False):
@@ -1048,7 +1060,9 @@ class Transcriber:
                 while buf and not buf[0].size:
                     buf.pop(0)
             active = [buf for buf in self._mix_buffers if buf]
-            if not active or (not flush and len(active) != len(self._mix_buffers)):
+            waiting = any(not buf and slot not in self._dead_slots
+                          for slot, buf in enumerate(self._mix_buffers))
+            if not active or (not flush and waiting):
                 return
             n = min(buf[0].size for buf in active)
             mixed = np.zeros(n, dtype=np.float32)
@@ -1091,6 +1105,8 @@ class Transcriber:
                     if data.size:
                         with self._mix_lock:
                             if self.recording.is_set():
+                                self._slot_last_block[slot] = time.monotonic()
+                                self._dead_slots.discard(slot)
                                 self._mix_buffers[slot].append(data)
         except Exception as e:
             self.status_queue.put(f"ERRO ({label}): {e}")
@@ -1167,7 +1183,12 @@ class Transcriber:
             self._pending = 0
         self._streams = []
         self._resamplers = []
-        self._mix_buffers = [[], []] if capture_mode == "os_dois" else [[]]
+        with self._mix_lock:
+            self._mix_buffers = [[], []] if capture_mode == "os_dois" else [[]]
+            self._slot_labels = {"microfone": ["microfone"], "audio_pc": ["áudio do PC"],
+                                 "os_dois": ["microfone", "áudio do PC"]}[capture_mode]
+            self._slot_last_block = [time.monotonic()] * len(self._mix_buffers)
+            self._dead_slots.clear()
         self._slot = 0
         try:
             if capture_mode != "audio_pc":
@@ -1182,7 +1203,9 @@ class Transcriber:
                 s.close()
             raise
         self._drained = False  # so depois dos streams de pe: se falhar, nada fica ocupado
-        self.recording.set()
+        with self._mix_lock:
+            self._slot_last_block = [time.monotonic()] * len(self._mix_buffers)
+            self.recording.set()
         fonte = {"microfone": "mic", "audio_pc": "audio do PC",
                  "os_dois": "mic + audio do PC"}[capture_mode]
         self.status_queue.put(f"Gravando ({fonte}) — pode falar.")
