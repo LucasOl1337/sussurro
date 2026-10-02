@@ -57,7 +57,7 @@ class CudaRecoveryTests(unittest.TestCase):
             self.t.model, self.t.model_config = recovered, config
         with patch.object(self.t, '_weights', return_value='/cached'), \
              patch.object(self.t, '_load_model_config', side_effect=load) as loading:
-            with self.assertRaisesRegex(RuntimeError, 'Aplicar modelo'):
+            with self.assertRaisesRegex(RuntimeError, 'Recarregando sozinho'):
                 self.t._transcribe_locked(self.audio, language='pt', vad_filter=False)
         loading.assert_called_once()
         recovered.transcribe.assert_called_once()
@@ -66,7 +66,7 @@ class CudaRecoveryTests(unittest.TestCase):
         messages = []
         while not self.t.status_queue.empty():
             messages.append(self.t.status_queue.get_nowait())
-        self.assertTrue(any('Aplicar modelo' in message for message in messages))
+        self.assertTrue(any('Recarregando sozinho' in message for message in messages))
         ipc = app.IpcServer(queue.Queue(), app.IPC_SOCK, self.t)
         self.assertFalse(json.loads(ipc._handle('status'))['ready'])
 
@@ -101,7 +101,7 @@ class CudaRecoveryTests(unittest.TestCase):
                     self.assertEqual(saved, updated)
                     if fail_again:
                         self.assertEqual(updated['text'], 'texto anterior')
-                        self.assertIn('Aplicar modelo', updated['retry_error'])
+                        self.assertIn('Recarregando sozinho', updated['retry_error'])
                         self.assertIsNone(self.t.model)
                     else:
                         self.assertEqual(updated['text'], 'recuperado')
@@ -178,7 +178,7 @@ class CudaRecoveryTests(unittest.TestCase):
             raise RuntimeError('carga falhou')
         with patch.object(self.t, '_weights', return_value='/cache'), \
              patch.object(self.t, '_load_model_config', side_effect=load) as loading:
-            with self.assertRaisesRegex(RuntimeError, 'Aplicar modelo'):
+            with self.assertRaisesRegex(RuntimeError, 'Recarregando sozinho'):
                 self.t._transcribe_locked(self.audio, language='pt', vad_filter=True)
         loading.assert_called_once()
         self.assertIsNone(self.t.model)
@@ -193,7 +193,7 @@ class CudaRecoveryTests(unittest.TestCase):
             self.t.model.transcribe.side_effect = RuntimeError('CUDA invalid device')
         with patch.object(self.t, '_weights', return_value='/cache'), \
              patch.object(self.t, '_load_model_config', side_effect=load):
-            with self.assertRaisesRegex(RuntimeError, 'Aplicar modelo'):
+            with self.assertRaisesRegex(RuntimeError, 'Recarregando sozinho'):
                 self.t._transcribe_locked(self.audio, language='pt', vad_filter=True, config=temporary)
         self.assertEqual(loaded, [temporary, temporary])
         self.assertIsNone(self.t.model)

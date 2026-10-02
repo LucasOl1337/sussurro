@@ -182,6 +182,10 @@ def _is_wayland() -> bool:
 HISTORY_DIR = Path(__file__).with_name("history")
 HISTORY_INDEX = HISTORY_DIR / "history.jsonl"
 HIST_RENDER_MAX = 200  # linhas desenhadas na aba HISTORICO (a memoria guarda tudo)
+# Falha CUDA repetida descarta o modelo; o app recarrega sozinho (VRAM costuma voltar em segundos).
+CUDA_DISCARD_STATUS = "ERRO: modelo descartado apos falha CUDA. Recarregando sozinho em instantes."
+MODEL_RECOVERY_DELAY_MS = 5000
+
 DEFAULT_SETTINGS = {
     **DEFAULT_MODEL_SETTINGS,
     "mouse_button": "x2",       # middle | x1 | x2
@@ -1581,7 +1585,7 @@ class Transcriber:
                                 continue
                         unavailable = True
                         self._clear_model_locked()
-                        status = "ERRO: modelo indisponivel apos falha CUDA. Clique em Aplicar modelo para carregar novamente."
+                        status = CUDA_DISCARD_STATUS
                         self.status_queue.put(status)
                         raise RuntimeError(status) from error
             finally:
@@ -3896,6 +3900,7 @@ class App:
             self.bar.flash("busy", "Comparacao em andamento.", 1200)
             return False
         if self.transcriber.model is None or self.transcriber.model_loading.is_set():
+            self._recover_model()
             self.status.configure(text="Modelo ainda carregando — aguarde.")
             self.bar.flash("busy", "Modelo ainda carregando.", 1200)
             return False
@@ -3971,6 +3976,13 @@ class App:
             "whisper_device": next(k for k, v in self.device_labels.items() if v == self.device_choice.get()),
         }
         self._begin_model_load(selection, persist=True)
+
+    def _recover_model(self):
+        """Sem modelo e sem carga em curso (falha CUDA, VRAM cheia): tenta de novo o modelo salvo."""
+        if (self.transcriber.model is not None or self.transcriber.model_loading.is_set()
+                or self.transcriber.busy()):
+            return
+        self._begin_model_load(dict(self.settings), persist=False)
 
     def _begin_model_load(self, selection, *, persist):
         # Set the gate on Tk's thread before launching work: queued hotkeys cannot race it.
@@ -4097,6 +4109,8 @@ class App:
                 if msg.startswith("ERRO"):
                     self.bar.flash("error", msg, 2000)
                     self._sound("error")
+                if msg == CUDA_DISCARD_STATUS:
+                    self.root.after(MODEL_RECOVERY_DELAY_MS, self._recover_model)
         except queue.Empty:
             pass
         self.root.after(UI_POLL_MS, self._poll)
