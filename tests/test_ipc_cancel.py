@@ -20,6 +20,7 @@ class IpcCancelTests(unittest.TestCase):
     def make_app(self, state):
         ui = app.App.__new__(app.App)
         ui.settings = {'feedback_sounds': False}
+        ui.meeting_panel = None
         ui.hotkey_queue = queue.Queue()
         ui.text_queue = queue.Queue()
         ui.status_queue = queue.Queue()
@@ -140,8 +141,7 @@ class IpcCancelTests(unittest.TestCase):
             'toggle': ('toggle', None), 'start': ('start', None), 'stop': ('stop', None),
             'toggle-enter': ('toggle', {'enter': True}),
             'start-enter': ('start', {'enter': True}), 'stop-enter': ('stop', {'enter': True}),
-            'meeting-start': ('meeting', 'start'), 'meeting-stop': ('meeting', 'stop'),
-            'meeting-pause': ('meeting', 'pause'), 'cancel': ('cancel', None),
+            'cancel': ('cancel', None),
         }
         events = queue.Queue()
         server = app.IpcServer(events, Path('/unused.sock'))

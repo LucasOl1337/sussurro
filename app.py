@@ -1967,6 +1967,7 @@ class RecorderBar:
 
         self._state = None
         self._feedback = None  # tipo, motivo, prazo monotonic
+        self._meeting = None  # pausada, segundos gravados
         self._notice_font = _pil_font(10 * self.SS)
         self._reason_font = _pil_font(8 * self.SS)
         self._hovered = None    # "cancel" | "ok" | None
@@ -2068,10 +2069,22 @@ class RecorderBar:
         self._phase = 0.0
         self._draw()
 
+    def set_meeting(self, recording: bool, paused: bool, seconds: float):
+        self._meeting = (paused, int(seconds)) if recording else None
+        if self._state in ("rec", "proc") or self._feedback:
+            return
+        if recording and self._state != "meeting":
+            self.show("meeting")
+        elif not recording and self._state == "meeting":
+            self.hide()
+
     def finish(self):
         """O trabalho acabou, mas um aviso recente precisa terminar de aparecer."""
         if self._feedback and time.monotonic() < self._feedback[2]:
             self._state = self._feedback[0]
+        elif self._meeting:
+            if self._state != "meeting":
+                self.show("meeting")
         else:
             self.hide()
 
@@ -2088,7 +2101,7 @@ class RecorderBar:
         if self._feedback and time.monotonic() >= self._feedback[2]:
             self._feedback = None
             if self._state in ("busy", "error"):
-                self.hide()
+                self.finish()
         if self._state is None:
             self._ticking = False
             return
@@ -2101,6 +2114,8 @@ class RecorderBar:
 
     # -- mouse ---------------------------------------------------------------
     def _zone(self, x, y):
+        if self._state == "meeting":
+            return None  # indicador apenas: nao confundir X de ditado com parar reuniao
         if self._state in ("busy", "error"):
             return "dismiss" if 0 <= x < self.W and 0 <= y < self.H else None
         r2 = (self.BTN / 2) ** 2
@@ -2179,6 +2194,15 @@ class RecorderBar:
                             radius=(self.H / 2 - 0.7) * s,
                             fill=self.PILL_BG, outline=notice_color if self._feedback else self.PILL_BORDER,
                             width=max(1, round(1.1 * s)))
+        if self._state == "meeting" and self._meeting:
+            paused, seconds = self._meeting
+            color = INK_3 if paused else "#7aa2c8"
+            d.ellipse([12 * s, 16 * s, 20 * s, 24 * s], fill=color)
+            d.text((self.W / 2 * s, 5 * s), "PAUSADA" if paused else "REUNIAO",
+                   font=self._notice_font, fill=color, anchor="mt")
+            d.text((self.W / 2 * s, 21 * s), f"{seconds // 60:02d}:{seconds % 60:02d}",
+                   font=self._reason_font, fill=INK_2, anchor="mt")
+            return img.resize((self.W, self.H), Image.BOX)
         if self._feedback:
             kind, reason, _ = self._feedback
             active = self._state in ("rec", "proc")
@@ -2319,8 +2343,8 @@ class IpcServer(threading.Thread):
                         raw = conn.recv(4096).decode("utf-8", "replace").strip()
                         if not raw:
                             continue
-                        if raw.split(" ", 1)[0].lower() == "transcribe":
-                            # Arquivo demora: nao prende o accept do atalho.
+                        if raw.split(" ", 1)[0].lower() == "transcribe" or raw.lower().startswith("meeting-"):
+                            # Arquivo/ACK de reuniao aguardam fora do accept do atalho.
                             threading.Thread(target=self._serve_slow, args=(conn.dup(), raw),
                                              name="sussurro-ipc-file", daemon=True).start()
                             continue
@@ -2363,8 +2387,12 @@ class IpcServer(threading.Thread):
         # ao terminar de colar, o Sussurro aperta Enter para confirmar o envio.
         base, _, flag = data.partition("-")
         if base == "meeting" and flag in ("start", "stop", "pause"):
-            self.event_queue.put(("meeting", flag))
-            return "ok\n"
+            reply = queue.Queue(maxsize=1)
+            self.event_queue.put(("meeting", (flag, reply, time.monotonic() + 1.0)))
+            try:
+                return reply.get(timeout=1.0)
+            except queue.Empty:
+                return "err Reuniao nao confirmou o comando a tempo, confira o estado antes de repetir.\n"
         if base in ("toggle", "start", "stop") and flag in ("", "enter"):
             _perf("activation_request", source="ipc", command=data)
             self.event_queue.put((base, {"enter": True} if flag == "enter" else None))
@@ -3935,6 +3963,12 @@ class App:
                 fn(*args, **kwargs)
         except queue.Empty:
             pass
+        panel = self.meeting_panel
+        if panel is not None:
+            seconds = panel.elapsed
+            if panel.recording and not panel.paused:
+                seconds += time.monotonic() - panel.resumed_at
+            self.bar.set_meeting(panel.recording, panel.paused, seconds)
         # primeiro de tudo: a barra so fica enquanto ha trabalho. Esperar o status certo
         # a punha pra sair depois de colar e de redesenhar o historico — e e isso que o
         # olho le como travamento.
@@ -3963,8 +3997,19 @@ class App:
                     if self.transcriber.recording.is_set() or not self.transcriber._drained:
                         self._cancel()
                 elif event == "meeting":
-                    if self.meeting_panel is not None:
-                        self.meeting_panel.command(payload)
+                    verb, reply, deadline = payload
+                    if time.monotonic() >= deadline:
+                        continue  # cliente desistiu antes de comecar: nao gravar depois do err
+                    try:
+                        response = (self.meeting_panel.command(verb) if self.meeting_panel is not None
+                                    else "err Reuniao indisponivel nesta plataforma.\n")
+                    except Exception as error:
+                        response = "err " + str(error).replace("\n", " ") + "\n"
+                    reply.put_nowait(response)
+                    if response.startswith("err"):
+                        self.status.configure(text=response.strip())
+                        self.bar.flash("error", response.strip(), 2000)
+                        self._sound("error")
                 elif event == "toggle":
                     if self.transcriber.recording.is_set():
                         if _wants_enter(payload):

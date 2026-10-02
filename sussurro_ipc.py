@@ -76,6 +76,8 @@ def cli(argv: list[str]) -> bool:
         print("sussurro nao esta rodando", file=sys.stderr)
         raise SystemExit(1)
     sys.stdout.write(resposta)
+    if cmd.startswith('meeting-') and resposta.startswith('err'):
+        raise SystemExit(1)
     # transcribe sinaliza falha no proprio JSON: o chamador (Hermes) le o codigo de saida
     if cmd == "transcribe" and '"ok": true' not in resposta.lower():
         raise SystemExit(1)

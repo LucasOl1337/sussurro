@@ -111,6 +111,24 @@ class RecorderBarTkTests(unittest.TestCase):
         self.cancel.assert_not_called()
         self.confirm.assert_not_called()
 
+    def test_meeting_indicator_renders_pause_and_never_calls_dictation_controls(self):
+        self.bar.hide()
+        self.bar.set_meeting(True, False, 65)
+        self.root.update()
+        running = self.bar._render().tobytes()
+        self.click(self.bar.LX, self.bar.CY)
+        self.cancel.assert_not_called()
+        self.confirm.assert_not_called()
+        self.bar.set_meeting(True, True, 65)
+        self.root.update()
+        self.assertEqual(self.bar._state, 'meeting')
+        self.assertNotEqual(self.bar._render().tobytes(), running)
+        self.bar.show('rec')
+        self.bar.set_meeting(True, True, 65)
+        self.assertEqual(self.bar._state, 'rec')
+        self.bar.finish()
+        self.assertEqual(self.bar._state, 'meeting')
+
 
 class RecorderBarCancelTests(unittest.TestCase):
     def test_cancel_calls_processing_cancel_and_hides_bar(self):
