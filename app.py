@@ -1593,6 +1593,19 @@ class Transcriber:
                         raise RuntimeError("Nao foi possivel restaurar o modelo do ditado. "
                                            "Clique em Aplicar modelo para carrega-lo novamente.") from error
 
+    @staticmethod
+    def _audio_diagnosis(audio):
+        # Audio normalizado [-1, 1]: ate um passo de PCM16 nao ha sinal util;
+        # RMS abaixo de -50 dBFS indica entrada muito baixa, nao falha do modelo.
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) if audio.size else 0.0
+        level = {"peak": round(peak, 8), "rms": round(rms, 8)}
+        if peak <= 1 / 32768:
+            return level, "Microfone não enviou sinal (confira a entrada)."
+        if rms < 10 ** (-50 / 20):
+            return level, "Áudio muito baixo."
+        return level, "Fala não reconhecida. Tente Refazer com outro modelo."
+
     def transcribe_file(self, path: str) -> dict:
         """Transcreve um arquivo de audio e arquiva no historico, sem microfone nem colagem.
 
@@ -1618,7 +1631,8 @@ class Transcriber:
             text = format_transcript(segments)
             text, fixes = self.library.apply(text)
             if not text:
-                raise ValueError("nenhuma fala reconhecida")
+                entry = self._archive_audio(audio, text, fixes, datetime.now(), failed=True)
+                raise ValueError(entry["error"])
             entry = self._archive_audio(audio, text, fixes, datetime.now())
             _perf("file_done", source=src.name, audio_s=round(audio.size / SAMPLE_RATE, 3),
                   inference_ms=round((time.perf_counter() - t0) * 1000, 1))
@@ -1632,6 +1646,10 @@ class Transcriber:
     def _archive_audio(self, audio, text: str, fixes: int, started: datetime, *,
                        failed: bool = False, error: str | None = None, sid=None) -> dict | None:
         """Grava o WAV e seu registro, inclusive quando a transcricao falhou."""
+        if failed:
+            level, diagnosis = self._audio_diagnosis(audio)
+            if not error or error.lower().rstrip(".") == "nenhuma fala reconhecida":
+                error = diagnosis
         HISTORY_DIR.mkdir(exist_ok=True)
         wav_name = started.strftime("%Y%m%d_%H%M%S") + ".wav"
         temporary = None
@@ -1657,11 +1675,14 @@ class Transcriber:
                          "text": text, "dur": round(audio.size / SAMPLE_RATE, 2), "fix": fixes}
                 if failed:
                     entry["failed"] = True
-                    entry["error"] = error or "Nenhuma fala reconhecida."
+                    entry["error"] = error
+                    entry["audio_level"] = level
                 with self._history_lock:
                     with HISTORY_INDEX.open("a", encoding="utf-8") as f:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 self.history_queue.put(entry)
+                if failed:
+                    self.status_queue.put(f"ERRO: {error}")
                 return entry
         finally:
             if temporary is not None:
@@ -1749,7 +1770,10 @@ class Transcriber:
             text = format_transcript(segments)
             text, fixes = self.library.apply(text)
             if not text:
-                raise ValueError("nenhuma fala reconhecida")
+                level, diagnosis = self._audio_diagnosis(audio)
+                if entry.get("failed") or not entry.get("text"):
+                    result["audio_level"] = level
+                raise ValueError(diagnosis)
             updated = {**entry, "text": text, "dur": round(audio.size / SAMPLE_RATE, 2),
                        "fix": fixes, "language": language}
             if config is not None:
