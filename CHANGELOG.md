@@ -4,6 +4,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- `sussurro transcribe` (áudio do WhatsApp pelo Hermes) não disputa mais o modelo com um ditado em andamento: responde ocupado em JSON e o Hermes pode tentar de novo.
+- Botão **Liberar espaço** no histórico: apaga o WAV de ditados com texto mais antigos que N dias, depois de mostrar quantos arquivos e quantos MiB. O texto fica; áudio sem texto nunca é apagado. Entradas sem áudio mostram "Sem áudio".
 - Depois de uma falha CUDA que descarta o modelo (VRAM cheia por um instante), o Sussurro recarrega o modelo salvo sozinho em 5 s, e o próximo atalho também dispara a recarga. Na v0.7.0 o ditado ficava parado até clicar em **Aplicar modelo**.
 - A barra mostra **REUNIAO** com o tempo gravado enquanto uma reunião grava, mesmo fora da aba; pausada, fica cinza e o relógio para. O ditado tem prioridade e a barra volta pra reunião quando ele termina. O indicador não tem X nem confirmar.
 - `sussurro meeting-start|meeting-stop|meeting-pause` espera o painel responder: `ok` quando aplicou, `err` com código de saída 1 quando não (gravação interrompida pendente, nada gravando, painel indisponível ou sem resposta a tempo).
