@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 _MON_TTL = 3.0  # s: cache da lista de monitores
-_SKIP_PASTE_CLASSES = frozenset({"SussurroBar"})
+_SKIP_PASTE_CLASSES = frozenset({"Sussurro", "SussurroBar"})
 
 
 def _socket_path() -> Path | None:
@@ -216,14 +216,24 @@ class Hypr:
             return False
         return result.returncode == 0 and result.stdout.strip() == "true"
 
-    def focus_at_cursor(self):
-        """Foca a janela sob o ponteiro. Devolve o dict da janela, ou None."""
-        pos = self.native_cursorpos()
-        if not pos:
-            return None
-        win = self.window_at(*pos)
+    def focus_at_cursor(self, target=None):
+        """Foca o address salvo, ou a janela sob o ponteiro se ela desapareceu."""
+        win = None
+        if target and target.get("address"):
+            clients = self._query("clients")
+            if not isinstance(clients, list):
+                raise RuntimeError("Nao foi possivel verificar o destino do ditado; texto preservado no historico.")
+            win = next((w for w in clients if w.get("address") == target["address"]
+                        and w.get("mapped")), None)
+        if win is None:
+            pos = self.native_cursorpos()
+            if not pos:
+                return None
+            win = self.window_at(*pos)
         if not win:
             return None
+        if (win.get("class") or win.get("initialClass")) in _SKIP_PASTE_CLASSES:
+            raise RuntimeError("O proprio Sussurro nao pode receber o ditado; texto preservado no historico.")
         active = self.activewindow()
         if not active or active.get("address") != win.get("address"):
             if not self.focus_window(win):

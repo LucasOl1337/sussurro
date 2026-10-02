@@ -399,7 +399,7 @@ def click_at_cursor() -> bool:
         return False
 
 
-def prepare_paste_target():
+def prepare_paste_target(target=None):
     """Garante janela + campo sob o mouse antes do Ctrl+V.
 
     Devolve a classe da janela alvo para escolher o atalho (terminal vs ctrl_v).
@@ -408,13 +408,19 @@ def prepare_paste_target():
         return None
     h = _hypr()
     if not h.available:
-        return focused_window_class()
-    win = h.focus_at_cursor()
+        cls = focused_window_class()
+        if cls in {"Sussurro", "SussurroBar"}:
+            raise RuntimeError("O proprio Sussurro nao pode receber o ditado; texto preservado no historico.")
+        return cls
+    win = h.focus_at_cursor(target) if target else h.focus_at_cursor()
     time.sleep(0.04)
     cls = None
     if isinstance(win, dict):
         cls = win.get("class") or win.get("initialClass")
-    strategy = paste_strategy(cls or focused_window_class())
+    cls = cls or focused_window_class()
+    if cls in {"Sussurro", "SussurroBar"}:
+        raise RuntimeError("O proprio Sussurro nao pode receber o ditado; texto preservado no historico.")
+    strategy = paste_strategy(cls)
     if strategy == "ctrl_v":
         pos = h.native_cursorpos()
         hit = h.window_at(*pos, include_bar=True) if pos else None
@@ -422,7 +428,7 @@ def prepare_paste_target():
         if win and hit and hit.get("address") == win.get("address"):
             click_at_cursor()
             time.sleep(0.03)
-    return cls or focused_window_class()
+    return cls
 
 
 def monitor_work_area(x: int, y: int):
@@ -939,6 +945,7 @@ class Transcriber:
         self._loopback_slots: set = set()
         self._dead_slots: set = set()
         self._session_inject = False
+        self._session_target = None
         self._session_mode = "simultaneo"
         self._session_had_speech = False
         self._session_emitted = False  # ja saiu texto nesta sessao (colar / ao vivo)
@@ -1191,6 +1198,14 @@ class Transcriber:
         if self.busy():
             raise RuntimeError("Aguarde o ditado anterior terminar.")
         self._session_inject = inject
+        self._session_target = None
+        if inject and not IS_WIN:
+            h = _hypr()
+            pos = h.native_cursorpos() if h.available else None
+            if pos:
+                win = h.window_at(*pos)
+                if win and win.get("address"):
+                    self._session_target = {"address": win["address"]}
         self._session_auto_enter = auto_enter
         self._session_mode = self.transcribe_mode
         self._session_had_speech = False
@@ -1738,7 +1753,8 @@ class Transcriber:
 
     def _paste_linux(self, text: str):
         with self._clipboard_lock:
-            target_class = prepare_paste_target()
+            target_class = (prepare_paste_target(self._session_target) if self._session_target
+                            else prepare_paste_target())
             strategy = paste_strategy(target_class)
             if not set_clipboard_text(text):
                 if _is_wayland() and _hypr().available:
