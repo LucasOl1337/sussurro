@@ -1935,6 +1935,9 @@ class RecorderBar:
         self.win.withdraw()
 
         self._state = None
+        self._feedback = None  # tipo, motivo, prazo monotonic
+        self._notice_font = _pil_font(10 * self.SS)
+        self._reason_font = _pil_font(8 * self.SS)
         self._hovered = None    # "cancel" | "ok" | None
         self._pressed = None
         self._press_xy = (0, 0)
@@ -2011,6 +2014,7 @@ class RecorderBar:
 
     # -- ciclo de vida -------------------------------------------------------
     def show(self, state: str):
+        self._feedback = None
         if self.hypr:
             _hypr().reset_bar_placement()
         self._state = state
@@ -2025,8 +2029,24 @@ class RecorderBar:
     def visivel(self) -> bool:
         return self._state is not None
 
+    def flash(self, kind: str, reason: str, duration_ms: int):
+        active = self._state in ("rec", "proc")
+        if not active:
+            self.show(kind)
+        self._feedback = (kind, reason, time.monotonic() + duration_ms / 1000)
+        self._phase = 0.0
+        self._draw()
+
+    def finish(self):
+        """O trabalho acabou, mas um aviso recente precisa terminar de aparecer."""
+        if self._feedback and time.monotonic() < self._feedback[2]:
+            self._state = self._feedback[0]
+        else:
+            self.hide()
+
     def hide(self):
         self._state = None
+        self._feedback = None
         self._dragging = False
         self._moved = False
         self._pressed = None
@@ -2034,6 +2054,10 @@ class RecorderBar:
         self.win.withdraw()
 
     def _tick(self):
+        if self._feedback and time.monotonic() >= self._feedback[2]:
+            self._feedback = None
+            if self._state in ("busy", "error"):
+                self.hide()
         if self._state is None:
             self._ticking = False
             return
@@ -2046,6 +2070,8 @@ class RecorderBar:
 
     # -- mouse ---------------------------------------------------------------
     def _zone(self, x, y):
+        if self._state in ("busy", "error"):
+            return "dismiss" if 0 <= x < self.W and 0 <= y < self.H else None
         r2 = (self.BTN / 2) ** 2
         if (x - self.LX) ** 2 + (y - self.CY) ** 2 <= r2:
             return "cancel"
@@ -2091,7 +2117,10 @@ class RecorderBar:
             return
         zone, self._pressed = self._pressed, None
         if zone and self._zone(event.x, event.y) == zone:
-            (self.on_cancel if zone == "cancel" else self.on_confirm)()
+            if zone == "dismiss":
+                self.hide()
+            else:
+                (self.on_cancel if zone == "cancel" else self.on_confirm)()
 
     def _save_pos(self):
         wx, wy = self.win.winfo_x(), self.win.winfo_y()
@@ -2114,11 +2143,29 @@ class RecorderBar:
         s = self.SS
         img = Image.new("RGB", (self.W * s, self.H * s), self.TRANSPARENT)
         d = ImageDraw.Draw(img)
+        notice_color = "#f08080" if self._feedback and self._feedback[0] == "error" else INK_3
         d.rounded_rectangle([0.7 * s, 0.7 * s, (self.W - 0.7) * s, (self.H - 0.7) * s],
                             radius=(self.H / 2 - 0.7) * s,
-                            fill=self.PILL_BG, outline=self.PILL_BORDER,
+                            fill=self.PILL_BG, outline=notice_color if self._feedback else self.PILL_BORDER,
                             width=max(1, round(1.1 * s)))
-        self._draw_wave(d)
+        if self._feedback:
+            kind, reason, _ = self._feedback
+            active = self._state in ("rec", "proc")
+            x0, x1 = (self.WX0, self.WX1) if active else (12, self.W - 12)
+            w = round((x1 - x0) * s)
+            strip = Image.new("RGB", (w, 30 * s), self.PILL_BG)
+            text = ImageDraw.Draw(strip)
+            text.text((w / 2, 0), "ERRO" if kind == "error" else "OCUPADO",
+                      font=self._notice_font, fill=notice_color, anchor="mt")
+            width = text.textlength(reason, font=self._reason_font)
+            offset = int(self._phase * 45 * s) % max(1, int(width + w / 2)) if width > w else 0
+            text.text((-offset if width > w else w / 2, 15 * s), reason,
+                      font=self._reason_font, fill=INK_2, anchor="lt" if width > w else "mt")
+            img.paste(strip, (round(x0 * s), 5 * s))
+            if not active:
+                return img.resize((self.W, self.H), Image.BOX)
+        else:
+            self._draw_wave(d)
         self._draw_cancel(d)
         if self._state == "rec":
             self._draw_confirm(d)
@@ -3720,9 +3767,15 @@ class App:
     def _start(self, inject: bool, auto_enter: bool = False):
         if self.transcriber.comparing.is_set():
             self.status.configure(text="Comparacao em andamento — termine ou cancele na aba COMPARAR.")
+            self.bar.flash("busy", "Comparacao em andamento.", 1200)
             return False
         if self.transcriber.model is None or self.transcriber.model_loading.is_set():
             self.status.configure(text="Modelo ainda carregando — aguarde.")
+            self.bar.flash("busy", "Modelo ainda carregando.", 1200)
+            return False
+        if not self.transcriber.recording.is_set() and self.transcriber.busy():
+            self.status.configure(text="Aguarde o ditado ou arquivo anterior terminar.")
+            self.bar.flash("busy", "Aguarde o trabalho anterior.", 1200)
             return False
         try:
             self.transcriber.start(
@@ -3740,6 +3793,7 @@ class App:
             else:
                 alvo = "o microfone"
             self.status.configure(text=f"ERRO ao abrir {alvo}: {e}")
+            self.bar.flash("error", f"ERRO ao abrir {alvo}: {e}", 2000)
             return False
         self.record_btn.configure(text="PARAR")
         self.bar.show("rec")
@@ -3837,7 +3891,7 @@ class App:
         # a punha pra sair depois de colar e de redesenhar o historico — e e isso que o
         # olho le como travamento.
         if self.bar.visivel() and not self.transcriber.busy():
-            self.bar.hide()
+            self.bar.finish()
         try:
             while True:
                 event, payload = self.hotkey_queue.get_nowait()
@@ -3848,6 +3902,7 @@ class App:
                     self.status.configure(text=f"Atalho definido: {BUTTON_LABELS[payload]}.")
                 elif event == "error":
                     self.status.configure(text=f"ERRO: {payload}")
+                    self.bar.flash("error", f"ERRO: {payload}", 2000)
                 elif event == "start":
                     if not self._start(inject=True, auto_enter=_wants_enter(payload)):
                         self.hotkey.active = False  # falhou: nao deixa o estado do atalho preso
@@ -3888,7 +3943,7 @@ class App:
                 msg = self.status_queue.get_nowait()
                 self.status.configure(text=msg)
                 if msg.startswith("ERRO"):
-                    self.bar.hide()
+                    self.bar.flash("error", msg, 2000)
         except queue.Empty:
             pass
         self.root.after(UI_POLL_MS, self._poll)
