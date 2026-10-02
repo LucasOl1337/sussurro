@@ -257,18 +257,30 @@ class MeetingPanel(ctk.CTkFrame):
 
     # -- gravacao ------------------------------------------------------------
     def start(self):
-        if self.recording or self.abort is not None:
-            return
+        if self.recording:
+            return 'ok\n'
+        if self.closed or self.abort is not None:
+            return 'err Aguarde o trabalho da reuniao terminar.\n'
         if rec.pending_recording() is not None:
             self.ready_status.configure(text='Há uma gravação interrompida: salve ou descarte antes de começar outra.')
-            return
-        if self.sources is None:
-            self.sources = (rec.Source(rec.MIC), rec.Source(rec.PC))
-        mic, pc, _ = rec.raw_paths()
-        self.started = datetime.now()
-        self._write_state()
-        self.sources[0].start_recording(mic)
-        self.sources[1].start_recording(pc)
+            return 'err Ha uma gravacao interrompida: salve ou descarte antes de comecar outra.\n'
+        try:
+            if self.sources is None:
+                self.sources = []
+                for device in (rec.MIC, rec.PC):
+                    self.sources.append(rec.Source(device))
+            mic, pc, _ = rec.raw_paths()
+            self.started = datetime.now()
+            self._write_state()
+            self.sources[0].start_recording(mic)
+            self.sources[1].start_recording(pc)
+        except Exception as error:
+            for source in self.sources or ():
+                source.close()
+            self.sources = None
+            message = f'ERRO ao iniciar reuniao: {error}'
+            self.ready_status.configure(text=message)
+            return 'err ' + message.replace('\n', ' ') + '\n'
         self.recording, self.paused = True, False
         self.elapsed, self.resumed_at = 0.0, time.monotonic()
         self.start_btn.pack_forget()
@@ -278,6 +290,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.import_btn.configure(state='disabled')
         self.previous.configure(state='disabled')
         self._set_ready_text()
+        return 'ok\n'
 
     def _write_state(self):
         """Nome e idioma valem no momento em que para: dao pra mudar durante a call."""
@@ -677,8 +690,15 @@ class MeetingPanel(ctk.CTkFrame):
     def command(self, verb):
         """`sussurro meeting-start|meeting-stop|meeting-pause`: para atalhos do Hyprland."""
         if verb == 'start':
-            self.start()
+            return self.start()
         elif verb == 'stop':
+            if not self.recording:
+                return 'err Nenhuma reuniao gravando.\n'
             self.stop()
         elif verb == 'pause':
+            if not self.recording:
+                return 'err Nenhuma reuniao gravando.\n'
             self.pause()
+        else:
+            return 'err Comando de reuniao desconhecido.\n'
+        return 'ok\n'

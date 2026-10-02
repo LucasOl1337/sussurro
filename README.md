@@ -175,6 +175,10 @@ Instalações anteriores à v0.4.0 não tinham escolha de modelo: ao atualizar, 
 
 A aba **REUNIÃO** grava o seu microfone e o que o PC toca em duas trilhas separadas, e ao parar transcreve com quem falou o quê. Funciona com qualquer app de chamada, porque só escuta o áudio do sistema: nenhum bot entra na call e nada sai da máquina. Portado do [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) de Jankees van Woezik (MIT), trocando o whisper.cpp na CPU pelo modelo do ditado na GPU.
 
+A bolinha mostra **REUNIAO** em azul com o tempo gravado, mesmo fora da aba. Pausada, fica cinza e o relógio para. Durante um ditado a bolinha prioriza o ditado e volta à reunião quando ele termina. O indicador da reunião não tem X nem confirmar, para não parar uma call por engano.
+
+`sussurro meeting-start|meeting-stop|meeting-pause` espera o resultado do painel. `ok` confirma o comando aplicado. `err` sai com código 1, inclusive quando há gravação interrompida aguardando recuperação ou o painel está indisponível. Se o comando não confirmar a tempo, confira o estado antes de repetir.
+
 - **Antes de começar**, os dois medidores já mostram o microfone e o áudio do PC. Nome e idioma podem mudar durante a call; **Pausar** congela as duas trilhas.
 - **Cada lado é transcrito separado**, então duas pessoas falando juntas ou música por baixo não apagam a voz mais baixa, e o lado de cada frase é a própria trilha (Você / Remoto). Sem fone, a voz dos outros vaza no seu microfone; o eco é reconhecido e fica de fora.
 - **Várias vozes no mesmo lado** (um colega do seu lado, três pessoas do outro) são separadas pelo [Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) da NVIDIA na GPU: Remoto 1, Remoto 2 e assim por diante. Cada falante ganha um campo de nome e uma cor.
