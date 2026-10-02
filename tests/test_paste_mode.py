@@ -82,6 +82,8 @@ class PasteModeTests(unittest.TestCase):
         hypr.available = True
         hypr.focus_at_cursor = lambda: win
         with patch.object(app, '_hypr', return_value=hypr), \
+             patch.object(hypr, 'native_cursorpos', return_value=(400, 400)), \
+             patch.object(hypr, 'window_at', return_value=win), \
              patch.object(app, 'click_at_cursor', return_value=True) as click, \
              patch.object(app.time, 'sleep'):
             self.assertEqual(app.prepare_paste_target(), 'chromium')
@@ -94,6 +96,58 @@ class PasteModeTests(unittest.TestCase):
              patch.object(app.time, 'sleep'):
             self.assertEqual(app.prepare_paste_target(), 'foot')
             click.assert_not_called()
+
+    def test_paste_over_bar_keeps_confirmed_target_focus_without_clicking_bar(self):
+        target = {'address': 'target', 'class': 'chromium', 'mapped': True,
+                  'at': [0, 0], 'size': [800, 600], 'workspace': {'id': 2}}
+        bar = {'address': 'bar', 'class': 'SussurroBar', 'mapped': True,
+               'floating': True, 'pinned': True, 'at': [100, 100], 'size': [152, 40]}
+        monitors = [{'x': 0, 'y': 0, 'width': 800, 'height': 600,
+                     'activeWorkspace': {'id': 2}}]
+        h = Hypr()
+        h.available = True
+        focused = [bar]
+
+        def focus(win):
+            focused[0] = win
+            return True
+
+        with patch.object(threading.Thread, 'start'), \
+             patch.object(app.keyboard, 'Controller'):
+            transcriber = app.Transcriber(queue.Queue(), queue.Queue())
+        with patch.object(app, '_hypr', return_value=h), \
+             patch.object(h, '_query', side_effect=lambda cmd: [target, bar] if cmd == 'clients' else monitors), \
+             patch.object(h, 'native_cursorpos', return_value=(228, 120)), \
+             patch.object(h, 'activewindow', side_effect=lambda: focused[0]), \
+             patch.object(h, 'focus_window', side_effect=focus) as set_focus, \
+             patch.object(app, 'click_at_cursor', side_effect=lambda: focus(bar)) as click, \
+             patch.object(app.time, 'sleep'), \
+             patch.object(app, 'backup_clipboard', return_value=b'original'), \
+             patch.object(app, 'set_clipboard_text', return_value=True), \
+             patch.object(transcriber, '_send_paste_key', side_effect=lambda strategy: focused[0] == target) as paste, \
+             patch.object(threading.Timer, 'start'), \
+             patch.object(app, '_is_wayland', return_value=True):
+            transcriber._paste_linux('ditado depois do confirmar')
+            set_focus.assert_called_once_with(target)
+            click.assert_not_called()
+            paste.assert_called_once_with('ctrl_v')
+            self.assertEqual(focused[0], target)
+
+    def test_prepare_does_not_click_new_or_unknown_pointer_target(self):
+        target = {'address': 'target', 'class': 'chromium'}
+        h = Hypr()
+        h.available = True
+        for position, hit in ((None, None), ((10, 10), None),
+                              ((10, 10), {'address': 'other', 'class': 'chromium'})):
+            with self.subTest(position=position, hit=hit), \
+                 patch.object(app, '_hypr', return_value=h), \
+                 patch.object(h, 'focus_at_cursor', return_value=target), \
+                 patch.object(h, 'native_cursorpos', return_value=position), \
+                 patch.object(h, 'window_at', return_value=hit), \
+                 patch.object(app.time, 'sleep'), \
+                 patch.object(app, 'click_at_cursor') as click:
+                self.assertEqual(app.prepare_paste_target(), 'chromium')
+                click.assert_not_called()
 
 
 class WindowAtCursorTests(unittest.TestCase):
@@ -129,6 +183,13 @@ class WindowAtCursorTests(unittest.TestCase):
         hit = h.window_at(400, 400)
         self.assertEqual(hit['address'], '0xc')
         self.assertEqual(h.window_at(10, 10)['class'], 'foot')
+        self.assertEqual(h.window_at(120, 120)['class'], 'foot')
+        self.assertEqual(h.window_at(120, 120, include_bar=True)['class'], 'SussurroBar')
+        clients[1]['hidden'] = True
+        self.assertEqual(h.window_at(120, 120, include_bar=True)['class'], 'foot')
+        clients[1]['hidden'] = False
+        clients[1]['mapped'] = False
+        self.assertEqual(h.window_at(120, 120, include_bar=True)['class'], 'foot')
 
     def test_focused_terminal_beats_invisible_overlapping_workspace(self):
         h = Hypr()

@@ -144,9 +144,10 @@ class Hypr:
             return int(pos["x"]), int(pos["y"])
         return None
 
-    def window_at(self, x: int, y: int):
+    def window_at(self, x: int, y: int, *, include_bar: bool = False):
         """Janela no ponto (x, y) do compositor, ignorando a barra do Sussurro.
 
+        include_bar permite detectar a barra sobre o campo antes de um clique.
         Prefere janela flutuante, depois a menor area (widget/modal por cima do
         tile), depois a mais recentemente focada. Sem isso o Ctrl+V do wtype
         cai na janela com foco de teclado, que no multi-monitor costuma ser
@@ -175,7 +176,7 @@ class Hypr:
                     and not client.get("pinned")):
                 continue
             cls = (client.get("class") or client.get("initialClass") or "")
-            if cls in _SKIP_PASTE_CLASSES:
+            if cls in _SKIP_PASTE_CLASSES and not include_bar:
                 continue
             at = client.get("at") or [0, 0]
             size = client.get("size") or [0, 0]
@@ -187,7 +188,7 @@ class Hypr:
                 continue
             if x0 <= x < x0 + width and y0 <= y < y0 + height:
                 hits.append((
-                    0 if client.get("floating") else 1,
+                    -1 if cls in _SKIP_PASTE_CLASSES else (0 if client.get("floating") else 1),
                     width * height,
                     int(client["focusHistoryID"] if client.get("focusHistoryID") is not None else 10**6),
                     client,
