@@ -13,11 +13,11 @@ o.window({ class = "^Sussurro$" }, {
 
 -- Barra de gravacao do Sussurro (janela Tk/XWayland de 152x40, classe SussurroBar).
 -- Gerenciada como flutuante fixa: o Hyprland recorta os cantos (rounding), nao anima,
--- nao sombreia e nunca recebe foco, entao o Enter/colar continua indo pro app de baixo.
+-- nao sombreia e nao toma foco ao abrir ou passar o mouse. no_focus impediria os cliques.
 o.window({ class = "^SussurroBar$" }, {
   float = true,
   pin = true,
-  no_focus = true,
+  no_follow_mouse = true,
   no_initial_focus = true,
   no_anim = true,
   no_shadow = true,

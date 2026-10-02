@@ -17,7 +17,7 @@ require("hypr.sussurro")
 O que as regras fazem:
 
 - Janela principal (`Sussurro`): opaca e renderizada mesmo sem foco, para o CUDA/Tk nao travarem em outro workspace.
-- Barra de gravacao (`SussurroBar`, 152x40): flutuante, fixa em todos os workspaces, sem foco (o Enter e o Ctrl+V continuam indo pro app de baixo), sem sombra/animacao e com `rounding = 20`. O Tk em X11 nao tem transparencia por pixel, entao e o Hyprland que recorta os cantos da capsula.
+- Barra de gravacao (`SussurroBar`, 152x40): flutuante, fixa em todos os workspaces, sem tomar foco ao abrir (`no_initial_focus`) ou passar o mouse (`no_follow_mouse`), sem sombra/animacao e com `rounding = 20`. Um clique pode focar a barra e aciona X, confirmar ou arrastar. Nao use `no_focus`: no Hyprland essa regra exclui a janela do hit-test do ponteiro e os cliques passam para o app de baixo. O Tk em X11 nao tem transparencia por pixel, entao e o Hyprland que recorta os cantos da capsula.
 
 Valide com `hyprctl reload && hyprctl configerrors`.
 
