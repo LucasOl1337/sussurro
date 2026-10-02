@@ -928,6 +928,10 @@ class Transcriber:
         self._history_lock = threading.Lock()
         self._retrying = threading.Event()
         self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
+        self._slot_last_block: list = []
+        self._slot_labels: list = []
+        self._loopback_slots: set = set()
+        self._dead_slots: set = set()
         self._session_inject = False
         self._session_mode = "simultaneo"
         self._session_had_speech = False
@@ -1032,7 +1036,9 @@ class Transcriber:
             res = self._resamplers[slot]
             data = res.process(mono) if res else mono.copy()
             with self._mix_lock:
-                if self.recording.is_set():
+                if self.recording.is_set() and data.size:
+                    self._slot_last_block[slot] = time.monotonic()
+                    self._dead_slots.discard(slot)
                     self._mix_buffers[slot].append(data)
 
         return cb
@@ -1041,6 +1047,16 @@ class Transcriber:
         while True:
             time.sleep(0.01)
             with self._mix_lock:
+                if self.recording.is_set():
+                    now = time.monotonic()
+                    for slot, last in enumerate(self._slot_last_block):
+                        if now - last > 2.0 and slot not in self._dead_slots:
+                            self._dead_slots.add(slot)
+                            # Monitor pode ficar sem blocos no silencio. Libera o
+                            # mixer, mas so a saida da thread prova sua morte.
+                            if slot not in self._loopback_slots:
+                                self.status_queue.put(
+                                    f"ERRO: {self._slot_labels[slot]} parou de enviar áudio")
                 self._drain_mix_locked()
 
     def _drain_mix_locked(self, flush: bool = False):
@@ -1050,7 +1066,9 @@ class Transcriber:
                 while buf and not buf[0].size:
                     buf.pop(0)
             active = [buf for buf in self._mix_buffers if buf]
-            if not active or (not flush and len(active) != len(self._mix_buffers)):
+            waiting = any(not buf and slot not in self._dead_slots
+                          for slot, buf in enumerate(self._mix_buffers))
+            if not active or (not flush and waiting):
                 return
             n = min(buf[0].size for buf in active)
             mixed = np.zeros(n, dtype=np.float32)
@@ -1070,6 +1088,17 @@ class Transcriber:
                 self.levels.append(float(np.sqrt(np.mean(part * part))))
 
     def _loopback_loop(self, slot: int, label: str, device_index: int | None, handle):
+        try:
+            self._capture_loopback(slot, label, device_index, handle)
+        finally:
+            while not self.recording.is_set() and not handle.stop_flag.is_set():
+                time.sleep(0.02)
+            with self._mix_lock:
+                if self.recording.is_set() and not handle.stop_flag.is_set():
+                    self._dead_slots.add(slot)
+                    self.status_queue.put("ERRO: áudio do PC parou de enviar áudio")
+
+    def _capture_loopback(self, slot: int, label: str, device_index: int | None, handle):
         """Captura o que o PC esta tocando (WASAPI loopback / monitor PulsePipeWire)."""
         try:
             loop = _open_loopback_mic(device_index, self.status_queue, label)
@@ -1093,6 +1122,8 @@ class Transcriber:
                     if data.size:
                         with self._mix_lock:
                             if self.recording.is_set():
+                                self._slot_last_block[slot] = time.monotonic()
+                                self._dead_slots.discard(slot)
                                 self._mix_buffers[slot].append(data)
         except Exception as e:
             self.status_queue.put(f"ERRO ({label}): {e}")
@@ -1169,7 +1200,14 @@ class Transcriber:
             self._pending = 0
         self._streams = []
         self._resamplers = []
-        self._mix_buffers = [[], []] if capture_mode == "os_dois" else [[]]
+        with self._mix_lock:
+            self._mix_buffers = [[], []] if capture_mode == "os_dois" else [[]]
+            self._slot_labels = {"microfone": ["microfone"], "audio_pc": ["áudio do PC"],
+                                 "os_dois": ["microfone", "áudio do PC"]}[capture_mode]
+            self._slot_last_block = [time.monotonic()] * len(self._mix_buffers)
+            self._loopback_slots = ({len(self._mix_buffers) - 1}
+                                    if capture_mode != "microfone" else set())
+            self._dead_slots.clear()
         self._slot = 0
         try:
             if capture_mode != "audio_pc":
@@ -1184,7 +1222,9 @@ class Transcriber:
                 s.close()
             raise
         self._drained = False  # so depois dos streams de pe: se falhar, nada fica ocupado
-        self.recording.set()
+        with self._mix_lock:
+            self._slot_last_block = [time.monotonic()] * len(self._mix_buffers)
+            self.recording.set()
         fonte = {"microfone": "mic", "audio_pc": "audio do PC",
                  "os_dois": "mic + audio do PC"}[capture_mode]
         self.status_queue.put(f"Gravando ({fonte}) — pode falar.")
