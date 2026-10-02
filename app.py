@@ -1544,14 +1544,41 @@ class Transcriber:
             temporary = config is not None and config != previous
             if temporary:
                 self._replace_model_locked(config)
+            unavailable = False
             try:
-                segments, info = self.model.transcribe(
-                    audio, language=language, beam_size=5, vad_filter=vad_filter,
-                    hotwords=self.library.hotwords,
-                )
-                return drop_hallucinations(list(segments), audio), info
+                for attempt in range(2):
+                    try:
+                        segments, info = self.model.transcribe(
+                            audio, language=language, beam_size=5, vad_filter=vad_filter,
+                            hotwords=self.library.hotwords,
+                        )
+                        return drop_hallucinations(list(segments), audio), info
+                    except RuntimeError as error:
+                        message = str(error).lower()
+                        cuda = ("cuda" in message or
+                                (self.model_config is not None and self.model_config.device == "cuda"
+                                 and any(word in message for word in ("out of memory", "invalid device"))))
+                        if not cuda and not attempt:
+                            raise
+                        choice = self.model_config
+                        segments = None  # libera o gerador antes de descartar os pesos
+                        error.__traceback__ = None
+                        if not attempt and choice is not None:
+                            self.status_queue.put("Erro CUDA. Recarregando o modelo para repetir o trecho...")
+                            try:
+                                self._clear_model_locked()
+                                self._load_model_config(choice, self._weights(choice, local_only=True))
+                            except Exception as reload_error:
+                                error = reload_error
+                            else:
+                                continue
+                        unavailable = True
+                        self._clear_model_locked()
+                        status = "ERRO: modelo indisponivel apos falha CUDA. Clique em Aplicar modelo para carregar novamente."
+                        self.status_queue.put(status)
+                        raise RuntimeError(status) from error
             finally:
-                if temporary:
+                if temporary and not unavailable:
                     self._clear_model_locked()
                     try:
                         self._load_model_config(previous, self._weights(previous, local_only=True))
