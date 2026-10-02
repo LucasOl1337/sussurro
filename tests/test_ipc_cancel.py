@@ -19,6 +19,7 @@ import app
 class IpcCancelTests(unittest.TestCase):
     def make_app(self, state):
         ui = app.App.__new__(app.App)
+        ui.settings = {'feedback_sounds': False}
         ui.hotkey_queue = queue.Queue()
         ui.text_queue = queue.Queue()
         ui.status_queue = queue.Queue()
