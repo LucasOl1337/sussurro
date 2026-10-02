@@ -23,6 +23,24 @@ Valide com `hyprctl reload && hyprctl configerrors`.
 
 A barra pergunta ao Hyprland (socket `.socket.sock`) onde o cursor esta e qual a area util do monitor, porque o Tk em XWayland enxerga uma tela unica com todos os monitores e o ponteiro dele congela fora de janelas X. Coordenadas coincidem com as do X com `xwayland:force_zero_scaling` (padrao do Omarchy) e monitores em escala 1.
 
+## Atalho para cancelar o ditado
+
+`sussurro cancel` descarta o ditado sem precisar clicar no X da barra. Também vale enquanto o ditado termina de processar. Sem ditado, responde `ok` e não altera nada. Não cancela reuniões ou transcrições de arquivo e não apaga texto já colado no modo simultâneo. `toggle` confirma a gravação, não cancela.
+
+Bind sugerido: **Super+Shift+Escape**. No Hyprland com configuração Lua, adicione ao seu arquivo de binds:
+
+```lua
+o.bind("SUPER + SHIFT + ESCAPE", "Cancelar ditado", "sussurro cancel")
+```
+
+Se você usa a configuração `.conf`, o equivalente é:
+
+```ini
+bind = SUPER SHIFT, Escape, exec, sussurro cancel
+```
+
+O app precisa estar aberto. Se não instalou o comando `sussurro`, use o caminho absoluto do Python do venv e do `app.py`, seguido de `cancel`. O cliente do atalho não carrega Tk, áudio ou CUDA.
+
 ## Gestos do headset: `70-mchose-x9.rules`
 
 A aba **OMARCHY** do app aciona o ditado pelo headset MCHOSE X9 sem tocar no PC. O fone so entrega ao PC volume +/-, play/pause e o audio; o mute do mic nao gera evento (so zera o audio e toca um aviso). Por isso os gestos sao:

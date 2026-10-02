@@ -10,7 +10,7 @@ IPC_SOCK = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "sussurro.sock"
 # transcricao de arquivo roda o whisper na hora: espera bem mais que um toggle
 TRANSCRIBE_TIMEOUT = 900.0
 
-COMANDOS = ("toggle", "start", "stop", "status",
+COMANDOS = ("toggle", "start", "stop", "cancel", "status",
             "toggle-enter", "start-enter", "stop-enter",
             "meeting-start", "meeting-stop", "meeting-pause")
 
@@ -35,10 +35,11 @@ def cli(argv: list[str]) -> bool:
     if len(argv) < 2:
         return False
     cmd = argv[1].lower()
-    usage = ("uso: sussurro [toggle|start|stop|status|toggle-enter|start-enter|stop-enter]\n"
+    usage = ("uso: sussurro [toggle|start|stop|cancel|status|toggle-enter|start-enter|stop-enter]\n"
              "     sussurro [meeting-start|meeting-stop|meeting-pause]\n"
              "     sussurro transcribe <arquivo de audio>\n"
              "  *-enter: ao terminar, aperta Enter (uso pelo fone)\n"
+             "  cancel: descarta o ditado atual; sem ditado, nao faz nada\n"
              "  meeting-*: grava/para/pausa uma reuniao (aba REUNIAO)\n"
              "  transcribe: transcreve o arquivo e grava no historico (JSON na saida)")
     if cmd in ("-h", "--help"):

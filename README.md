@@ -64,6 +64,8 @@ O Tk que vem com o CPython do `uv` (python-build-standalone) é compilado **sem 
 
 No Omarchy a barra de gravação segue o monitor do cursor e ganha cantos recortados pelo compositor, e a aba **OMARCHY** aciona o ditado pelo headset MCHOSE X9 sem tocar no PC (roda de volume invertida rápido ou toque duplo no mute, com Enter automático ao terminar). Regras de janela, regra udev e instruções em [`contrib/omarchy/`](contrib/omarchy/README.md).
 
+Pra cancelar sem mirar no X da barra, use `sussurro cancel` (ou `python app.py cancel`). Ele descarta o ditado atual, inclusive enquanto termina de processar. Sem ditado, responde `ok` sem efeito. `toggle` durante a gravação confirma e transcreve, não cancela. Texto já colado no modo simultâneo não é apagado. Bind sugerido no Hyprland: **Super+Shift+Escape** executando `sussurro cancel`, conforme [o exemplo de configuração](contrib/omarchy/README.md#atalho-para-cancelar-o-ditado).
+
 ## Como rodar
 
 Windows:
