@@ -84,6 +84,7 @@ from sussurro_hardware import (detect_hardware, execution_device_labels,
 from sussurro_models import (MODEL_LABELS, DEFAULT_MODEL_SETTINGS,
                              normalize_model_settings, resolve_model_config, model_path)
 import sussurro_parakeet
+import sussurro_sounds
 from sussurro_meeting import drop_hallucinations
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 from pynput import keyboard, mouse
@@ -187,6 +188,7 @@ DEFAULT_SETTINGS = {
     "language": "pt",
     "inject_method": "colar",   # colar (clipboard + atalho do app focado) | digitar
     "dot_pos": [0.5, 0.94],     # posicao da bolinha, fracao da area util do monitor
+    "feedback_sounds": False,
     "devices": dict(devmod.DEFAULTS),  # gestos de dispositivos (aba OMARCHY, so Linux)
 }
 
@@ -3155,6 +3157,11 @@ class App:
                                    self.device_labels[self.settings["whisper_device"]], lambda _: None, 7, 1)
         self.apply_model_btn = self._secondary(card, "Aplicar modelo", self._apply_model)
         self.apply_model_btn.grid(row=7, column=2, sticky="ew", padx=CPAD, pady=(6, 0))
+        self.sounds_var = tk.BooleanVar(value=bool(self.settings["feedback_sounds"]))
+        ctk.CTkSwitch(card, text="Sons de inicio, fim e erro", variable=self.sounds_var,
+                      command=self._on_sounds, text_color=INK_2,
+                      progress_color=ACCENT, font=(self.FONT_UI, 11)).grid(
+            row=9, column=0, columnspan=3, sticky="w", padx=CPAD, pady=(0, CPAD))
         ctk.CTkLabel(card, text="CPU básico: Base · CPU moderno: Small · GPU NVIDIA: Turbo · "
                                "Large-v3 prioriza precisão.\nParakeet (só GPU): o mais rápido, sem idioma fixo; "
                                "em português às vezes escorrega pro inglês.\n" + execution_hardware_note(self.hardware),
@@ -3730,6 +3737,13 @@ class App:
     def _save(self):
         save_settings(self.settings)
 
+    def _on_sounds(self):
+        self.settings["feedback_sounds"] = bool(self.sounds_var.get())
+        self._save()
+
+    def _sound(self, event):
+        sussurro_sounds.play(event, enabled=bool(self.settings.get("feedback_sounds", False)))
+
     def _on_lang(self, _e):
         self.settings["language"] = self.lang.get()
         self.transcriber.language = self.lang.get()
@@ -3794,6 +3808,8 @@ class App:
         return self.loopback_devices[name]
 
     def _start(self, inject: bool, auto_enter: bool = False):
+        if self.transcriber.recording.is_set():
+            return True
         if self.transcriber.comparing.is_set():
             self.status.configure(text="Comparacao em andamento — termine ou cancele na aba COMPARAR.")
             self.bar.flash("busy", "Comparacao em andamento.", 1200)
@@ -3823,9 +3839,11 @@ class App:
                 alvo = "o microfone"
             self.status.configure(text=f"ERRO ao abrir {alvo}: {e}")
             self.bar.flash("error", f"ERRO ao abrir {alvo}: {e}", 2000)
+            self._sound("error")
             return False
         self.record_btn.configure(text="PARAR")
         self.bar.show("rec")
+        self._sound("start")
         return True
 
     def _stop(self):
@@ -3835,6 +3853,7 @@ class App:
         self.hotkey.active = False  # parar pela UI nao pode deixar o atalho invertido
         self.record_btn.configure(text="GRAVAR")
         self.bar.show("proc")
+        self._sound("stop")
 
     def _cancel(self):
         """X da barra: joga a sessao fora — nao transcreve, nao cola, nao arquiva."""
@@ -3932,6 +3951,7 @@ class App:
                 elif event == "error":
                     self.status.configure(text=f"ERRO: {payload}")
                     self.bar.flash("error", f"ERRO: {payload}", 2000)
+                    self._sound("error")
                 elif event == "start":
                     if not self._start(inject=True, auto_enter=_wants_enter(payload)):
                         self.hotkey.active = False  # falhou: nao deixa o estado do atalho preso
@@ -3973,6 +3993,7 @@ class App:
                 self.status.configure(text=msg)
                 if msg.startswith("ERRO"):
                     self.bar.flash("error", msg, 2000)
+                    self._sound("error")
         except queue.Empty:
             pass
         self.root.after(UI_POLL_MS, self._poll)
