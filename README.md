@@ -108,6 +108,8 @@ python app.py
 
 Na primeira execução o modelo escolhido é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. Em **Automático**, o Sussurro escolhe Turbo se detectar CUDA e Base se usar CPU. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
 
+No Linux, fechar a janela só esconde a interface: o motor e os atalhos seguem rodando. Pra reabrir, use `sussurro show` (ou `python app.py show`) ou abra o app de novo. Pra encerrar de verdade, use `sussurro quit` (ou `python app.py quit`). O primeiro fechamento mostra esse aviso uma vez. No Windows, fechar a janela continua encerrando o app.
+
 ## Escolha do modelo
 
 No card de configuração, escolha **MODELO** e **EXECUTAR EM** e clique em **Aplicar modelo**. A troca acontece sem reiniciar e só é aceita fora de um ditado ou transcrição em andamento. O cabeçalho e `python app.py status` mostram o modelo e dispositivo ativos. A preferência só é salva depois que o modelo carrega; se a troca falhar, o app tenta recuperar o anterior pelo cache.

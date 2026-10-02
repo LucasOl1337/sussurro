@@ -61,6 +61,7 @@ class IpcRobustnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('ja esta rodando', result.stdout)
         self.assertEqual(self.path.stat().st_ino, inode)
+        self.assertEqual(self.events.get_nowait(), ('show', None))
         self.assertEqual(self.send('toggle'), 'ok\n')
         self.assertEqual(self.events.get_nowait(), ('toggle', None))
 

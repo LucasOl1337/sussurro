@@ -23,6 +23,11 @@ if __name__ == "__main__":
         print(f"Nao foi possivel verificar o Sussurro existente: {e}", file=sys.stderr)
         raise SystemExit(1)
     if running:
+        try:
+            ipc_send("show")
+        except OSError as e:
+            print(f"Nao foi possivel reabrir o Sussurro: {e}", file=sys.stderr)
+            raise SystemExit(1)
         print("Sussurro ja esta rodando.")
         raise SystemExit(0)
 
@@ -2356,8 +2361,8 @@ class IpcServer(threading.Thread):
         if verb.lower() == "transcribe":
             return self._handle_transcribe(arg.strip())
         data = data.lower()
-        if data == "cancel":
-            self.event_queue.put(("cancel", None))
+        if data in ("cancel", "show", "quit"):
+            self.event_queue.put((data, None))
             return "ok\n"
         # "toggle-enter"/"start-enter"/"stop-enter": veio do fone (daemon x9-sussurro);
         # ao terminar de colar, o Sussurro aperta Enter para confirmar o envio.
@@ -2995,6 +3000,7 @@ class HistoryList(ctk.CTkFrame):
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
+        self._close_notice_shown = False
         root.title("Sussurro")
         assets = Path(__file__).with_name("assets")
         ico, png = assets / "sussurro.ico", assets / "sussurro.png"
@@ -3254,9 +3260,32 @@ class App:
         return ctk.CTkButton(master, **opts)
 
     def _close(self):
+        if IS_WIN:
+            self._quit()
+            return
+        self.root.withdraw()
+        if not self._close_notice_shown:
+            self._close_notice_shown = True
+            notice = "Segue rodando. Reabrir: sussurro show. Sair: sussurro quit."
+            self.status.configure(text=notice)
+            self.bar.flash("busy", notice, 12000)
+
+    def _show(self):
+        self.root.deiconify()
+        self.root.lift()
+
+    def _quit(self):
         self.compare_panel.close()
         if self.meeting_panel is not None:
             self.meeting_panel.close()
+        if not IS_WIN:
+            self._ipc._stop.set()
+            if self.hotkey._listener is not None:
+                self.hotkey._listener.stop()
+            if self.gestures is not None:
+                self.gestures.stop()
+            self.transcriber.cancel(from_processing=True)
+            self.bar.hide()
         self.root.destroy()
 
     # -- abas / historico ----------------------------------------------------
@@ -3943,7 +3972,12 @@ class App:
         try:
             while True:
                 event, payload = self.hotkey_queue.get_nowait()
-                if event == "captured":
+                if event == "show":
+                    self._show()
+                elif event == "quit":
+                    self._quit()
+                    return  # nenhum widget/after depois de destruir a raiz
+                elif event == "captured":
                     self.settings["mouse_button"] = payload
                     self.hotkey_var.set(BUTTON_LABELS[payload])
                     self._save()
