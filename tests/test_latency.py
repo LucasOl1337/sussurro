@@ -30,6 +30,12 @@ class LatencyTests(unittest.TestCase):
         with patch.object(threading.Thread, 'start'), patch.object(app.keyboard, 'Controller'):
             return app.Transcriber(queue.Queue(), queue.Queue())
 
+    def drain_delivery(self, t):
+        events = iter(list(t._delivery_queue.queue))
+        t._delivery_queue.get = lambda: next(events)
+        with self.assertRaises(StopIteration):
+            t._delivery_loop()
+
     def test_cli_without_site_packages_or_display(self):
         with tempfile.TemporaryDirectory() as directory:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
@@ -303,6 +309,7 @@ class LatencyTests(unittest.TestCase):
              patch.object(t, '_finalize_session'):
             with self.assertRaises(StopIteration):
                 t._transcribe_loop()
+            self.drain_delivery(t)
         enter.assert_not_called()
 
     def test_transcription_failure_still_archives_audio(self):
@@ -323,6 +330,7 @@ class LatencyTests(unittest.TestCase):
              patch.object(app.traceback, 'print_exc'):
             with self.assertRaises(StopIteration):
                 t._transcribe_loop()
+            self.drain_delivery(t)
             entries = [json.loads(line) for line in app.HISTORY_INDEX.read_text().splitlines()]
             self.assertEqual(len(entries), 1)
             self.assertTrue(entries[0]['failed'])

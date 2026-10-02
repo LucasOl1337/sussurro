@@ -914,6 +914,7 @@ class Transcriber:
         self.history_queue: queue.Queue = queue.Queue()
         self._audio_queue: queue.Queue = queue.Queue()
         self._segment_queue: queue.Queue = queue.Queue()
+        self._delivery_queue: queue.Queue = queue.Queue()
         self._session_parts: list = []
         self._session_audio: list = []
         self._session_errors: list[str] = []
@@ -944,6 +945,7 @@ class Transcriber:
         self._clipboard_lock = threading.RLock()
         threading.Thread(target=self._segmenter_loop, daemon=True).start()
         threading.Thread(target=self._transcribe_loop, daemon=True).start()
+        threading.Thread(target=self._delivery_loop, daemon=True).start()
         threading.Thread(target=self._mixer_loop, daemon=True).start()
 
     # -- modelo -------------------------------------------------------------
@@ -1260,7 +1262,7 @@ class Transcriber:
             s.close()
         with self._mix_lock:
             self._mix_buffers = [[] for _ in self._mix_buffers]
-        for q in (self._audio_queue, self._segment_queue):
+        for q in (self._audio_queue, self._segment_queue, self._delivery_queue):
             while True:
                 try:
                     q.get_nowait()
@@ -1357,17 +1359,8 @@ class Transcriber:
             try:
                 if sid != self._session_id:
                     continue  # sessao cancelada ou substituida: descarta sem colar nada
-                if audio is None:  # fim de sessao: grava no historico
-                    try:
-                        # o sentinela chega com inject=None: usar o estado da sessao, nao o campo da fila
-                        if (self._session_auto_enter and self._session_emitted
-                                and self._session_inject and not self._session_errors):
-                            self._press_enter()
-                        self._session_auto_enter = False
-                        self._finalize_session()
-                    finally:
-                        if sid == self._session_id:
-                            self._drained = True
+                if audio is None:  # finaliza so depois de entregar todos os trechos
+                    self._delivery_queue.put((None, None, None, sid, None, None, False))
                     continue
                 t0 = time.perf_counter()
                 lang = None if self.language == "auto" else self.language
@@ -1378,6 +1371,7 @@ class Transcriber:
                 if sid != self._session_id:
                     continue  # cancelado enquanto este trecho transcrevia
                 dt = time.perf_counter() - t0
+                payload = ""
                 para = self._session_emitted and lead_s >= PARAGRAPH_SILENCE_S
                 self._session_parts.append((audio, text, fixes, para))
                 if text:
@@ -1387,19 +1381,9 @@ class Transcriber:
                         payload = text
                     self.text_queue.put(payload)
                     self._session_emitted = True
-                if text and inject:
-                    if self.inject_method == "colar":
-                        self._paste(payload)
-                    else:
-                        self._type_fallback(payload)
-                _perf("segment_done", session=sid, audio_s=round(audio.size / SAMPLE_RATE, 3),
-                      inference_ms=round(dt * 1000, 1),
-                      delivery_ms=round((time.perf_counter() - t0 - dt) * 1000, 1),
-                      stop_to_delivery_ms=(round((time.perf_counter() - self._stop_requested_at) * 1000, 1)
-                                           if self._stop_requested_at is not None else None),
-                      injected=bool(text and inject))
-                state = "Gravando — pode falar." if self.recording.is_set() else "Parado."
-                self.status_queue.put(f"{state}  (trecho de {audio.size / SAMPLE_RATE:.1f}s em {dt:.1f}s)")
+                self._delivery_queue.put((audio.size / SAMPLE_RATE, payload, self.inject_method,
+                                          sid, t0 + dt, dt, bool(text and inject)))
+                deve_baixar = False  # a entrega agora e responsavel por dar baixa
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
                 if deve_baixar and sid == self._session_id:
@@ -1407,6 +1391,50 @@ class Transcriber:
                 self.status_queue.put(f"ERRO na transcricao: {e}")
             finally:
                 if deve_baixar and sid == self._session_id:
+                    self._pending_done()
+
+    def _delivery_loop(self):
+        """Uma fila por sessao: paste/type, Enter e historico nunca ultrapassam um trecho."""
+        while True:
+            audio_s, payload, method, sid, ready_at, dt, inject = self._delivery_queue.get()
+            try:
+                if sid != self._session_id:
+                    continue
+                if audio_s is None:
+                    try:
+                        if (self._session_auto_enter and self._session_emitted
+                                and self._session_inject and not self._session_errors):
+                            self._press_enter(sid)
+                        if sid == self._session_id:
+                            self._session_auto_enter = False
+                            self._finalize_session()
+                    finally:
+                        if sid == self._session_id:
+                            self._drained = True
+                    continue
+                if inject:
+                    if method == "colar":
+                        self._paste(payload)
+                    else:
+                        self._type_fallback(payload)
+                if sid != self._session_id:
+                    continue  # cancelado durante o envio: nao altera a proxima sessao
+                _perf("segment_done", session=sid, audio_s=round(audio_s, 3),
+                      inference_ms=round(dt * 1000, 1),
+                      delivery_ms=round((time.perf_counter() - ready_at) * 1000, 1),
+                      stop_to_delivery_ms=(round((time.perf_counter() - self._stop_requested_at) * 1000, 1)
+                                           if self._stop_requested_at is not None else None),
+                      injected=inject)
+                state = "Gravando — pode falar." if self.recording.is_set() else "Parado."
+                self.status_queue.put(f"{state}  (trecho de {audio_s:.1f}s em {dt:.1f}s)")
+            except Exception as e:
+                traceback.print_exc()
+                if audio_s is not None and sid == self._session_id:
+                    self._session_errors.append(f"{type(e).__name__}: {e}")
+                if sid == self._session_id:
+                    self.status_queue.put(f"ERRO na entrega: {e}")
+            finally:
+                if audio_s is not None and sid == self._session_id:
                     self._pending_done()
 
     def _transcribe_locked(self, audio, *, language, vad_filter, config=None):
@@ -1653,9 +1681,11 @@ class Transcriber:
         """Gesto do fone chegou no meio da sessao (ex.: parou por ele): confirma com Enter no fim."""
         self._session_auto_enter = True
 
-    def _press_enter(self):
+    def _press_enter(self, sid=None):
         """Modo fone: confirma o envio da frase com Enter depois da ultima colagem."""
         time.sleep(0.15)  # o app alvo precisa processar o Ctrl+V antes do Enter
+        if sid is not None and sid != self._session_id:
+            return  # cancelado enquanto aguardava o alvo processar a colagem
         if _ydotool_keys(f"{_KEY_ENTER}:1", f"{_KEY_ENTER}:0"):
             return
         if _is_wayland() and _hypr().available:
