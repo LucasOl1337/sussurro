@@ -1418,8 +1418,10 @@ class Transcriber:
                     self._enqueue_segment(buffer[:last_end], lead_s, sid=sid)
                     buffer = buffer[last_end:]
                 elif buffer.size > MAX_SEGMENT_S * SAMPLE_RATE:
-                    self._enqueue_segment(buffer, lead_s, sid=sid)
-                    buffer = np.zeros(0, dtype=np.float32)
+                    # A ultima fala ainda pode estar em andamento: aproveita a pausa anterior.
+                    cut = speech[-2]["end"] if len(speech) > 1 else buffer.size
+                    self._enqueue_segment(buffer[:cut], lead_s, sid=sid)
+                    buffer = buffer[cut:]
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
                 self.status_queue.put(f"ERRO na segmentacao: {e}")
