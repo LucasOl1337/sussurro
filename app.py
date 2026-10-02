@@ -1613,6 +1613,8 @@ class Transcriber:
         audios do WhatsApp. Retorna o mesmo dict que vai pro history.jsonl.
         """
         with self._pending_lock:
+            if self.recording.is_set() or not self._drained or self._pending:
+                raise RuntimeError("Modelo ocupado com ditado; aguarde o ditado terminar e tente novamente.")
             if self.model_loading.is_set() or self.comparing.is_set() or self._retrying.is_set():
                 raise RuntimeError("Modelo ocupado com troca, comparacao ou historico; aguarde.")
             self._file_jobs += 1

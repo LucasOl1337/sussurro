@@ -228,3 +228,21 @@ Todos estão no `.gitignore`. Nada é enviado para serviço externo: captura, VA
 ## Licença
 
 [MIT](LICENSE)
+
+## Transcrição de arquivo pelo IPC
+
+`sussurro transcribe /caminho/audio.wav` devolve JSON na saída padrão. Sucesso tem
+`"ok": true` e os campos do registro do histórico. Falha tem `"ok": false`,
+`"error"` e código de saída 1.
+
+Durante um ditado, inclusive enquanto os últimos trechos ainda estão sendo
+entregues, o arquivo é recusado antes de usar o modelo. O Hermes pode tentar de
+novo depois que o ditado terminar. Exemplo de resposta:
+
+```json
+{"ok": false, "error": "RuntimeError: Modelo ocupado com ditado; aguarde o ditado terminar e tente novamente."}
+```
+
+Uma recusa por ocupação não cria histórico nem altera o status do ditado. Arquivo
+sem fala continua retornando o diagnóstico no JSON, sem criar histórico ou
+status de erro na interface.
