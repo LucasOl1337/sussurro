@@ -15,10 +15,10 @@ COMANDOS = ("toggle", "start", "stop", "cancel", "status",
             "meeting-start", "meeting-stop", "meeting-pause")
 
 
-def ipc_send(cmd: str, timeout: float = 1.5) -> str:
+def ipc_send(cmd: str, timeout: float = 1.5, *, path=None) -> str:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
-        sock.connect(str(IPC_SOCK))
+        sock.connect(str(IPC_SOCK if path is None else path))
         sock.sendall((cmd.strip() + "\n").encode("utf-8"))
         partes = []
         while True:  # a resposta do transcribe passa de um recv
@@ -29,6 +29,19 @@ def ipc_send(cmd: str, timeout: float = 1.5) -> str:
             if partes[-1].endswith(b"\n"):
                 break
         return b"".join(partes).decode("utf-8", "replace")
+
+
+def already_running(path=None) -> bool:
+    """So socket ausente ou recusado autoriza substituir uma instancia antiga."""
+    if sys.platform == "win32":
+        return False
+    try:
+        response = ipc_send("status", path=path)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False
+    if not response.strip():
+        raise OSError("socket do Sussurro nao respondeu ao status")
+    return True
 
 
 def cli(argv: list[str]) -> bool:

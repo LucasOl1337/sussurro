@@ -8,7 +8,7 @@ Windows e Linux (X11/Pulse ou PipeWire). CPU ou GPU NVIDIA opcional.
 """
 
 import sys
-from sussurro_ipc import IPC_SOCK, cli as _cli, ipc_send
+from sussurro_ipc import IPC_SOCK, cli as _cli, ipc_send, already_running
 from sussurro_hypr import Hypr
 import sussurro_devices as devmod
 
@@ -16,9 +16,20 @@ import sussurro_devices as devmod
 if __name__ == "__main__" and _cli(sys.argv):
     raise SystemExit(0)
 
+if __name__ == "__main__":
+    try:
+        running = already_running()
+    except OSError as e:
+        print(f"Nao foi possivel verificar o Sussurro existente: {e}", file=sys.stderr)
+        raise SystemExit(1)
+    if running:
+        print("Sussurro ja esta rodando.")
+        raise SystemExit(0)
+
 import collections
 import gc
 import ctypes
+import errno
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -2180,14 +2191,18 @@ class IpcServer(threading.Thread):
         self._stop = threading.Event()
 
     def run(self):
+        owned_inode = None
         try:
             if self.path.exists():
+                if already_running(self.path):
+                    return  # nunca roubar o socket de uma instancia viva
                 try:
                     self.path.unlink()
                 except OSError:
                     pass
             self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._sock.bind(str(self.path))
+            owned_inode = self.path.stat().st_ino
             os.chmod(self.path, 0o600)
             self._sock.listen(4)
             self._sock.settimeout(0.5)
@@ -2196,23 +2211,39 @@ class IpcServer(threading.Thread):
                     conn, _ = self._sock.accept()
                 except socket.timeout:
                     continue
-                with conn:
-                    conn.settimeout(1)
-                    raw = conn.recv(4096).decode("utf-8", "replace").strip()
-                    if raw.split(" ", 1)[0].lower() == "transcribe":
-                        # transcricao de arquivo leva segundos: responder aqui deixaria o
-                        # atalho do mouse esperando. Sai da thread do accept.
-                        threading.Thread(target=self._serve_slow, args=(conn.dup(), raw),
-                                         name="sussurro-ipc-file", daemon=True).start()
-                        continue
-                    conn.sendall(self._handle(raw).encode("utf-8"))
-        except Exception:
+                except OSError as e:
+                    if self._stop.is_set():
+                        break
+                    if e.errno in (errno.EBADF, errno.ENOTSOCK, errno.EINVAL):
+                        raise
+                    traceback.print_exc()
+                    self._stop.wait(0.1)  # erro transitorio nao vira loop quente
+                    continue
+                try:
+                    with conn:
+                        conn.settimeout(1)
+                        raw = conn.recv(4096).decode("utf-8", "replace").strip()
+                        if not raw:
+                            continue
+                        if raw.split(" ", 1)[0].lower() == "transcribe":
+                            # Arquivo demora: nao prende o accept do atalho.
+                            threading.Thread(target=self._serve_slow, args=(conn.dup(), raw),
+                                             name="sussurro-ipc-file", daemon=True).start()
+                            continue
+                        conn.sendall(self._handle(raw).encode("utf-8"))
+                except (OSError, socket.timeout):
+                    continue  # cliente lento/fechado nao mata o atalho
+                except Exception:
+                    traceback.print_exc()
+        except Exception as e:
             traceback.print_exc()
+            self.event_queue.put(("error", f"atalho IPC indisponivel: {e}"))
         finally:
             try:
                 if self._sock is not None:
                     self._sock.close()
-                if self.path.exists():
+                if (self._stop.is_set() and owned_inode is not None and self.path.exists()
+                        and self.path.stat().st_ino == owned_inode):
                     self.path.unlink()
             except OSError:
                 pass
