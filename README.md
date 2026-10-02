@@ -66,6 +66,24 @@ No Omarchy a barra de gravação segue o monitor do cursor e ganha cantos recort
 
 Pra cancelar sem mirar no X da barra, use `sussurro cancel` (ou `python app.py cancel`). Ele descarta o ditado atual, inclusive enquanto termina de processar. Sem ditado, responde `ok` sem efeito. `toggle` durante a gravação confirma e transcreve, não cancela. Texto já colado no modo simultâneo não é apagado. Bind sugerido no Hyprland: **Super+Shift+Escape** executando `sussurro cancel`, conforme [o exemplo de configuração](contrib/omarchy/README.md#atalho-para-cancelar-o-ditado).
 
+### Ditar e enviar no chat
+
+`sussurro toggle-enter` começa o ditado e, no segundo acionamento, para, cola o texto no campo de destino e aperta **Enter** depois da última colagem. Use só onde Enter envia a mensagem. Pra revisar antes de enviar, use `sussurro toggle`, sem `-enter`.
+
+Bind sugerido no Omarchy com configuração Lua:
+
+```lua
+o.bind("SUPER + ALT + RETURN", "Ditar e enviar no chat", "sussurro toggle-enter")
+```
+
+Na configuração `.conf` do Hyprland:
+
+```ini
+bind = SUPER ALT, Return, exec, sussurro toggle-enter
+```
+
+Deixe o campo do chat focado antes de começar. `sussurro cancel` descarta o ditado e não envia Enter, mas não desfaz texto já colado. O comando também funciona como `python app.py toggle-enter`. A configuração do bind é manual, o app não altera seus atalhos.
+
 ## Como rodar
 
 Windows:
