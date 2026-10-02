@@ -73,6 +73,24 @@ class DeliveryTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive(), 'consumidor nao terminou')
             self.assertEqual(errors, [])
 
+    def test_dictating_with_sussurro_focused_only_saves_to_history(self):
+        t = self.transcriber(texts=('so guardar',))
+        t._session_auto_enter = True
+        t._session_emitted = True
+        t._paste = Mock(side_effect=app.OwnWindowTarget())
+        with self.workers(t, threading.Event()):
+            deadline = time.monotonic() + 2
+            while not t._finalize_session.called and time.monotonic() < deadline:
+                time.sleep(.01)
+        t._finalize_session.assert_called_once()
+        self.assertEqual(t._session_errors, [])
+        t._press_enter.assert_not_called()
+        messages = []
+        while not t.status_queue.empty():
+            messages.append(t.status_queue.get_nowait())
+        self.assertFalse([m for m in messages if m.startswith('ERRO')], messages)
+        self.assertTrue(any('salvo no historico' in m.lower() for m in messages), messages)
+
     def test_second_inference_runs_while_first_paste_is_blocked(self):
         t = self.transcriber()
         t._session_auto_enter = True

@@ -422,6 +422,13 @@ def click_at_cursor() -> bool:
         return False
 
 
+class OwnWindowTarget(RuntimeError):
+    """Ditado com o proprio Sussurro em foco: so guarda no historico, como antes."""
+
+    def __init__(self):
+        super().__init__("O proprio Sussurro estava em foco: texto salvo no historico, sem colar.")
+
+
 def prepare_paste_target(target=None):
     """Garante janela + campo sob o mouse antes do Ctrl+V.
 
@@ -433,7 +440,7 @@ def prepare_paste_target(target=None):
     if not h.available:
         cls = focused_window_class()
         if cls in {"Sussurro", "SussurroBar"}:
-            raise RuntimeError("O proprio Sussurro nao pode receber o ditado; texto preservado no historico.")
+            raise OwnWindowTarget()
         return cls
     win = h.focus_at_cursor(target) if target else h.focus_at_cursor()
     time.sleep(0.04)
@@ -442,7 +449,7 @@ def prepare_paste_target(target=None):
         cls = win.get("class") or win.get("initialClass")
     cls = cls or focused_window_class()
     if cls in {"Sussurro", "SussurroBar"}:
-        raise RuntimeError("O proprio Sussurro nao pode receber o ditado; texto preservado no historico.")
+        raise OwnWindowTarget()
     strategy = paste_strategy(cls)
     if strategy == "ctrl_v":
         pos = h.native_cursorpos()
@@ -1530,6 +1537,10 @@ class Transcriber:
                       injected=inject)
                 state = "Gravando — pode falar." if self.recording.is_set() else "Parado."
                 self.status_queue.put(f"{state}  (trecho de {audio_s:.1f}s em {dt:.1f}s)")
+            except OwnWindowTarget as e:
+                if sid == self._session_id:
+                    self._session_auto_enter = False  # Enter na janela do Sussurro apertaria botao
+                    self.status_queue.put(str(e))
             except Exception as e:
                 traceback.print_exc()
                 if audio_s is not None and sid == self._session_id:
