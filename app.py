@@ -415,8 +415,12 @@ def prepare_paste_target():
         cls = win.get("class") or win.get("initialClass")
     strategy = paste_strategy(cls or focused_window_class())
     if strategy == "ctrl_v":
-        click_at_cursor()
-        time.sleep(0.03)
+        pos = h.native_cursorpos()
+        hit = h.window_at(*pos, include_bar=True) if pos else None
+        # O foco ja foi confirmado. Clicar na barra (ou num novo alvo) o roubaria.
+        if win and hit and hit.get("address") == win.get("address"):
+            click_at_cursor()
+            time.sleep(0.03)
     return cls or focused_window_class()
 
 
