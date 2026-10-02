@@ -929,6 +929,7 @@ class Transcriber:
         self._mix_buffers: list = []  # buffers por stream; o mixer alinha e soma
         self._slot_last_block: list = []
         self._slot_labels: list = []
+        self._loopback_slots: set = set()
         self._dead_slots: set = set()
         self._session_inject = False
         self._session_mode = "simultaneo"
@@ -1049,8 +1050,11 @@ class Transcriber:
                     for slot, last in enumerate(self._slot_last_block):
                         if now - last > 2.0 and slot not in self._dead_slots:
                             self._dead_slots.add(slot)
-                            self.status_queue.put(
-                                f"ERRO: {self._slot_labels[slot]} parou de enviar áudio")
+                            # Monitor pode ficar sem blocos no silencio. Libera o
+                            # mixer, mas so a saida da thread prova sua morte.
+                            if slot not in self._loopback_slots:
+                                self.status_queue.put(
+                                    f"ERRO: {self._slot_labels[slot]} parou de enviar áudio")
                 self._drain_mix_locked()
 
     def _drain_mix_locked(self, flush: bool = False):
@@ -1082,6 +1086,17 @@ class Transcriber:
                 self.levels.append(float(np.sqrt(np.mean(part * part))))
 
     def _loopback_loop(self, slot: int, label: str, device_index: int | None, handle):
+        try:
+            self._capture_loopback(slot, label, device_index, handle)
+        finally:
+            while not self.recording.is_set() and not handle.stop_flag.is_set():
+                time.sleep(0.02)
+            with self._mix_lock:
+                if self.recording.is_set() and not handle.stop_flag.is_set():
+                    self._dead_slots.add(slot)
+                    self.status_queue.put("ERRO: áudio do PC parou de enviar áudio")
+
+    def _capture_loopback(self, slot: int, label: str, device_index: int | None, handle):
         """Captura o que o PC esta tocando (WASAPI loopback / monitor PulsePipeWire)."""
         try:
             loop = _open_loopback_mic(device_index, self.status_queue, label)
@@ -1188,6 +1203,8 @@ class Transcriber:
             self._slot_labels = {"microfone": ["microfone"], "audio_pc": ["áudio do PC"],
                                  "os_dois": ["microfone", "áudio do PC"]}[capture_mode]
             self._slot_last_block = [time.monotonic()] * len(self._mix_buffers)
+            self._loopback_slots = ({len(self._mix_buffers) - 1}
+                                    if capture_mode != "microfone" else set())
             self._dead_slots.clear()
         self._slot = 0
         try:

@@ -89,13 +89,13 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.assertTrue(self.t.status_queue.empty())
         self.assertIsNone(self.t._audio_queue.get_nowait())
 
-    def test_dead_loopback_unblocks_microphone(self):
+    def test_silent_loopback_unblocks_microphone_without_error(self):
         self.start()
         self.now += 2.01
         self.callback(0)
         self.mix_tick()
         np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.1, .2])
-        self.assertEqual(self.t.status_queue.get_nowait(), 'ERRO: áudio do PC parou de enviar áudio')
+        self.assertTrue(self.t.status_queue.empty())
 
     def test_resumed_callback_rejoins_mixing_and_can_timeout_again(self):
         self.start()
@@ -172,7 +172,25 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.assertTrue(self.t.status_queue.empty())
         self.now += .51
         self.mix_tick()
+        self.assertTrue(self.t.status_queue.empty())
+
+    def test_loopback_only_without_blocks_does_not_report_microphone_error(self):
+        self.start('audio_pc')
+        self.now += 10.0
+        self.mix_tick()
+        self.assertTrue(self.t.status_queue.empty())
+
+    def test_unexpected_loopback_exit_reports_error_and_unblocks_microphone(self):
+        self.start()
+        handle = SimpleNamespace(stop_flag=threading.Event())
+        with patch.object(app, '_open_loopback_mic', side_effect=RuntimeError('processo morreu')):
+            self.t._loopback_loop(1, 'audio do PC', None, handle)
+        self.assertEqual(self.t.status_queue.get_nowait(), 'ERRO (audio do PC): processo morreu')
         self.assertEqual(self.t.status_queue.get_nowait(), 'ERRO: áudio do PC parou de enviar áudio')
+        self.callback(0)
+        self.mix_tick()
+        np.testing.assert_allclose(self.t._audio_queue.get_nowait(), [.1, .2])
+        self.assertTrue(self.t.status_queue.empty())
 
 
 if __name__ == '__main__':
