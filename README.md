@@ -130,7 +130,7 @@ A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas 
 - **ElevenLabs Scribe** lê a chave de `ELEVENLABS_API_KEY` ou do chaveiro do sistema: `secret-tool store --label='ElevenLabs (Sussurro)' servico elevenlabs tipo api-key`.
 - **Grok (xAI)** lê `XAI_API_KEY` ou reaproveita o login do Grok CLI (`~/.grok/auth.json`, criado por `grok login`). O token expirado é renovado pelo próprio CLI.
 - Nenhuma chave vai para `settings.json` nem aparece em log ou mensagem de erro. Sem credencial, o seletor recusa a troca e o modelo atual continua.
-- **Fallback:** se a nuvem falhar (rede, cota, timeout), o mesmo trecho é transcrito no Turbo local, que carrega na hora. Por 60 s os trechos seguintes vão direto pro local; depois a nuvem é tentada de novo e a barra avisa quando voltou. O Turbo emprestado sai da VRAM após 2 min sem uso.
+- **Fallback:** se a nuvem falhar (rede, cota, timeout), o mesmo trecho é transcrito no Turbo local, que carrega na hora. Por 60 s os trechos seguintes vão direto pro local; depois a nuvem é tentada de novo e a barra avisa quando voltou. O Turbo emprestado sai da VRAM após 2 min sem uso; fica só o contexto CUDA do processo (~200 MB) até reabrir o app.
 - **Reunião é sempre local.** Com ditado na nuvem, a aba REUNIÃO usa o Turbo local, carregado só enquanto precisa.
 - Escolher um modelo de nuvem é escolher mandar o áudio do ditado para o provedor. Com modelo local, nada sai do PC.
 
