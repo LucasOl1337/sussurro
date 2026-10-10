@@ -1,10 +1,10 @@
 # Sussurro
 
-Ditado local para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Tudo roda na sua máquina — nenhum áudio sai do computador.
+Ditado para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Com modelo local (Turbo ou Large-v3) tudo roda na sua máquina e nenhum áudio sai do computador. A nuvem (ElevenLabs Scribe ou Grok da xAI) é opcional, só para o ditado, e cai pro Turbo local se a rede falhar.
 
 [Site](https://lucasol1337.github.io/sussurro/) · [Release v0.7.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.7.0) · [Changelog](CHANGELOG.md)
 
-O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper **Turbo na GPU ou Base na CPU**, com modelo selecionável**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
+O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper Turbo/Large-v3 local ou STT na nuvem**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 
 ## Requisitos
 
@@ -34,7 +34,7 @@ uv venv --python 3.11
 uv pip install -r requirements-cuda.txt --override overrides-cuda.txt
 ```
 
-O `--override` troca o onnxruntime de CPU (que o faster-whisper puxa) pelo onnxruntime-gpu, usado pelo Parakeet e pela separação de vozes das reuniões. Sem ele os dois pacotes brigam pelo mesmo módulo e o Parakeet não acha a GPU.
+O `--override` troca o onnxruntime de CPU (que o faster-whisper puxa) pelo onnxruntime-gpu, usado pela separação de vozes das reuniões. Sem ele os dois pacotes brigam pelo mesmo módulo e a separação de vozes não acha a GPU.
 
 Ou com venv + pip:
 
@@ -106,7 +106,7 @@ source .venv/bin/activate
 python app.py
 ```
 
-Na primeira execução o modelo escolhido é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. Em **Automático**, o Sussurro escolhe Turbo se detectar CUDA e Base se usar CPU. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
+Na primeira execução o modelo local é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. O padrão é o Turbo, na GPU NVIDIA se houver e na CPU se não. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
 
 No Linux, fechar a janela só esconde a interface: o motor e os atalhos seguem rodando. Pra reabrir, use `sussurro show` (ou `python app.py show`) ou abra o app de novo. Pra encerrar de verdade, use `sussurro quit` (ou `python app.py quit`). O primeiro fechamento mostra esse aviso uma vez. No Windows, fechar a janela continua encerrando o app.
 
@@ -114,29 +114,33 @@ No Linux, fechar a janela só esconde a interface: o motor e os atalhos seguem r
 
 No card de configuração, escolha **MODELO** e **EXECUTAR EM** e clique em **Aplicar modelo**. A troca acontece sem reiniciar e só é aceita fora de um ditado ou transcrição em andamento. O cabeçalho e `python app.py status` mostram o modelo e dispositivo ativos. A preferência só é salva depois que o modelo carrega; se a troca falhar, o app tenta recuperar o anterior pelo cache.
 
-| Seu PC / prioridade | Ponto de partida recomendado | Execução |
+| Modelo | Onde roda | Quando usar |
 | --- | --- | --- |
-| PC fraco, CPU antigo | **Base**; Tiny se Base ainda ficar lento | CPU, INT8 |
-| Sem GPU dedicada, CPU recente | **Small**; Base para menor espera | CPU, INT8 |
-| Intermediário, como RTX 3060 | **Turbo** | CUDA, INT8/FP16 |
-| Forte, como RTX 4070 Ti Super | **Turbo** | CUDA, INT8/FP16 |
-| Fortíssimo, como RTX 4090 | **Turbo** para ditado; Large-v3 para priorizar precisão | CUDA, INT8/FP16 |
+| **Turbo** | local, GPU ou CPU | padrão: rápido, privado, ~1,3 GB de VRAM |
+| **Large-v3** | local, GPU ou CPU | mais preciso que o Turbo, ~2,1 GB de VRAM |
+| **ElevenLabs Scribe** | nuvem | melhor em termos técnicos, zero VRAM |
+| **Grok (xAI)** | nuvem | quase igual ao Scribe, mais rápido, zero VRAM |
 
-O seletor oferece **Tiny, Base, Small, Medium, Turbo e Large-v3**, todos multilíngues. Medium é uma opção intermediária para comparação; Turbo é a recomendação geral em GPU. Uma placa mais forte não torna necessário escolher um modelo maior. A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas gravações. Os perfis acima são recomendações, não benchmarks dessas placas, e não garantem ditado em tempo real em CPU.
+Os modelos locais ficam carregados na VRAM o tempo todo, mesmo parados. Os de nuvem não ocupam a GPU: o áudio do ditado vai por HTTPS e volta como texto. Em 31 termos técnicos ditados em português (nomes de produto, siglas, inglês no meio da frase), o Scribe acertou 29, o Grok 28 e o Large-v3 local 18. Em troca, a nuvem leva de 1,5 a 3 s por trecho, contra ~0,7 s do local numa RTX 4070 Ti Super. Na CPU, sem GPU NVIDIA, os locais ficam lentos e a nuvem é o caminho para ditado fluido.
+
+A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas gravações na aba COMPARAR.
+
+### Nuvem: credenciais, fallback e privacidade
+
+- **ElevenLabs Scribe** lê a chave de `ELEVENLABS_API_KEY` ou do chaveiro do sistema: `secret-tool store --label='ElevenLabs (Sussurro)' servico elevenlabs tipo api-key`.
+- **Grok (xAI)** lê `XAI_API_KEY` ou reaproveita o login do Grok CLI (`~/.grok/auth.json`, criado por `grok login`). O token expirado é renovado pelo próprio CLI.
+- Nenhuma chave vai para `settings.json` nem aparece em log ou mensagem de erro. Sem credencial, o seletor recusa a troca e o modelo atual continua.
+- **Fallback:** se a nuvem falhar (rede, cota, timeout), o mesmo trecho é transcrito no Turbo local, que carrega na hora. Por 60 s os trechos seguintes vão direto pro local; depois a nuvem é tentada de novo e a barra avisa quando voltou. O Turbo emprestado sai da VRAM após 2 min sem uso.
+- **Reunião é sempre local.** Com ditado na nuvem, a aba REUNIÃO usa o Turbo local, carregado só enquanto precisa.
+- Escolher um modelo de nuvem é escolher mandar o áudio do ditado para o provedor. Com modelo local, nada sai do PC.
 
 Se houver uma GPU AMD junto da NVIDIA, o Sussurro a identifica e explica seu estado abaixo do seletor, mas não oferece um botão AMD que falharia. O pacote Python normal do CTranslate2 usa CUDA; AMD requer uma compilação ROCm/HIP separada. Os dois backends não se somam para acelerar um único ditado, e manter a AMD livre evita disputar memória compartilhada quando ela é integrada ao processador.
 
 O Turbo reduz o decodificador do large-v3 de 32 para 4 camadas, com uma pequena perda de qualidade reportada pelos autores. INT8 reduz a precisão numérica para economizar memória. Fontes: [modelo oficial Turbo](https://huggingface.co/openai/whisper-large-v3-turbo) e [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Não incluímos modelos `.en` ou `distil-large-v3`, que são voltados ao inglês, na seleção para ditado em português.
 
-### Parakeet (NVIDIA)
-
-O **Parakeet TDT 0.6B v3** é o modelo de fala da NVIDIA que o voxtype do Omarchy também oferece. No Sussurro ele roda só na GPU, em FP16: no primeiro uso baixa 2,5 GB e converte uma vez para 1,3 GB, e ocupa uns 2,7 GB de VRAM (Turbo: 1,3 GB; Large-v3: 2,1 GB). É o mais rápido de todos: 25 s de fala em 0,1 s e 90 s em 0,4 s numa RTX 4070 Ti Super, contra 0,3 s e 0,7 s do Turbo.
-
-O custo é o idioma. O Parakeet não aceita idioma fixo: ele decide sozinho a cada trecho, e em português com termos técnicos em inglês às vezes escorrega pro inglês. Em 25 ditados reais em português, 7 saíram com pedaço em inglês. Também não usa as `hotwords` da Biblioteca (as trocas depois do texto continuam valendo). Para ditado em português, Turbo ou Large-v3 continuam sendo a escolha; o Parakeet está no seletor e no COMPARAR para você medir na sua voz.
-
 ## Comparar a mesma frase entre modelos
 
-Abra a aba **COMPARAR**, selecione os modelos e clique em **Gravar frase**. Fale uma vez e clique em **Parar e comparar**. O áudio do microfone selecionado é limitado a 30 segundos e reutilizado em todos os modelos. Você também pode carregar um WAV PCM de 16 bits, mono ou estéreo, de até 30 segundos.
+Abra a aba **COMPARAR**, selecione os modelos e clique em **Gravar frase**. Os de nuvem vêm desmarcados: marque só se quiser mandar a frase pro provedor. Fale uma vez e clique em **Parar e comparar**. O áudio do microfone selecionado é limitado a 30 segundos e reutilizado em todos os modelos. Você também pode carregar um WAV PCM de 16 bits, mono ou estéreo, de até 30 segundos.
 
 - **Paralelo (2 por vez):** até dois modelos executam ao mesmo tempo. Eles dividem os recursos; os tempos refletem essa disputa.
 - **Individual (1 por vez):** um modelo termina antes de começar o seguinte, facilitando a comparação de velocidade.
@@ -150,9 +154,9 @@ O áudio de comparação fica apenas na memória e em um WAV temporário sob `~/
 
 ### Atualizar de uma versão antiga
 
-Feche o Sussurro, atualize o código (`git pull --ff-only`, em um checkout sem alterações pendentes), atualize as dependências e abra novamente. Vindo de antes do Parakeet e das reuniões, na instalação CUDA troque o onnxruntime de CPU pelo de GPU: `uv pip uninstall onnxruntime` e depois `uv pip install -r requirements-cuda.txt --override overrides-cuda.txt`. Se baixou um ZIP, extraia a nova versão e preserve `settings.json`, `library.json` e `history/` da instalação anterior.
+Feche o Sussurro, atualize o código (`git pull --ff-only`, em um checkout sem alterações pendentes), atualize as dependências e abra novamente. Vindo de antes das reuniões, na instalação CUDA troque o onnxruntime de CPU pelo de GPU: `uv pip uninstall onnxruntime` e depois `uv pip install -r requirements-cuda.txt --override overrides-cuda.txt`. Se baixou um ZIP, extraia a nova versão e preserve `settings.json`, `library.json` e `history/` da instalação anterior.
 
-Instalações anteriores à v0.4.0 não tinham escolha de modelo: ao atualizar, recebem **Automático → Turbo na GPU / Base na CPU**. Histórico, biblioteca e demais preferências são preservados. Escolhas de modelo feitas a partir desta versão persistem nas próximas atualizações. Não há atualizador automático: é necessário instalar a nova versão.
+Quem usava Automático, Tiny, Base, Small, Medium ou Parakeet passa para o **Turbo** ao atualizar; Turbo e Large-v3 continuam como estavam. Histórico, biblioteca e demais preferências são preservados. Para liberar disco, apague o cache antigo do Parakeet em `~/.cache/sussurro/models/parakeet-*`. Não há atualizador automático: é necessário instalar a nova versão.
 
 ## Como usar
 
@@ -167,7 +171,7 @@ Instalações anteriores à v0.4.0 não tinham escolha de modelo: ao atualizar, 
 - **Idioma** — `pt`, `en` ou `auto`.
 - **Sons de início, fim e erro**: desligados por padrão. Ative o switch nas configurações para ouvir tons curtos e baixos ao iniciar/parar o ditado ou quando houver erro. Não interrompem a captura nem o áudio do histórico. Com um áudio já tocando pelo Sussurro, o tom é omitido. Se capturar o áudio do PC, os tons também podem entrar nessa trilha.
 - **Bolinha** — overlay sempre no topo, sem roubar foco e fora do Alt-Tab; laranja = gravando, invertida = transcrevendo. Arraste para reposicionar (a posição é salva como fração da área útil do monitor).
-- **Histórico / Ao vivo** — aba com as sessões passadas (tocar o WAV ou copiar o texto) e aba com o texto da sessão atual ("Copiar tudo" leva tudo pra área de transferência). Cada ditado tem um botão **Refazer**, inclusive quando a transcrição terminou sem erro. Escolha o motor/modelo (Whisper ou Parakeet), onde executar e o idioma para transcrever o mesmo áudio novamente. As escolhas valem só para essa tentativa; o modelo habitual volta ao terminar. O texto é atualizado na mesma entrada, sem duplicar o áudio nem colar automaticamente. Se a tentativa falhar, a transcrição anterior continua salva. Áudios cuja transcrição falhou também podem ser recuperados por esse botão.
+- **Histórico / Ao vivo** — aba com as sessões passadas (tocar o WAV ou copiar o texto) e aba com o texto da sessão atual ("Copiar tudo" leva tudo pra área de transferência). Cada ditado tem um botão **Refazer**, inclusive quando a transcrição terminou sem erro. Ele transcreve o mesmo áudio de novo com o modelo e o idioma atuais; pra tentar outro motor, troque no seletor e aplique antes. O texto é atualizado na mesma entrada, sem duplicar o áudio nem colar automaticamente. Se a tentativa falhar, a transcrição anterior continua salva. Áudios cuja transcrição falhou também podem ser recuperados por esse botão.
 - **Biblioteca** — aba onde você cadastra as palavras que o whisper escreve errado. Em "sai assim" liste as variantes separadas por vírgula (`grock, groque, nine houter`), em "deve virar" o termo certo (`Grok`), e clique em Adicionar. A troca é aplicada em toda transcrição antes de ela aparecer na tela, ser colada/digitada e ir para o histórico — sem diferença de maiúscula, tolerando espaçamento diferente em termos de duas palavras, e só em palavra inteira (`grok` não mexe em `grokking`). O ✕ remove a entrada; tudo vale na hora, sem reiniciar.
 - **Estatísticas** — aba com os números do seu ditado, todos derivados do `history/history.jsonl` (não há contador paralelo): total de palavras, palavras por minuto (palavras ÷ tempo de fala, com o melhor ditado à parte), sequência de dias seguidos e recorde, tempo falado e média por ditado, quanto tempo o mesmo texto levaria digitado a 40 ppm, correções aplicadas pela Biblioteca, mapa de atividade das últimas 26 semanas, distribuição por hora do dia e as palavras que você mais fala (boas candidatas à Biblioteca). Ditados antigos entram na conta — a duração é medida pelo tamanho do WAV; só a contagem de correções começa nesta versão. A janela se alarga sozinha ao abrir a aba (limitada à área útil do monitor) e volta ao tamanho anterior ao sair: nada de número escondido atrás de barra de rolagem.
 
@@ -197,7 +201,7 @@ O comando `sussurro toggle` usa um cliente leve de socket, sem importar Tk, áud
 
 A cópia via `wl-copy`/`xclip` não captura os pipes dos processos que ficam servindo o clipboard. Capturá-los provocava um timeout de 2 segundos e acionava a digitação de reserva. A restauração do clipboard aguarda 400 ms em segundo plano, respeita cópias feitas pelo usuário durante essa espera e mantém a ordem entre colagens consecutivas.
 
-O padrão em GPU NVIDIA é `large-v3-turbo`, CUDA, `int8_float16`; em CPU é `base`, `int8`. Se o hardware não suportar essa precisão, é usada uma alternativa suportada. A decodificação usa `beam_size=5`. O aquecimento consome o gerador de transcrição e inicializa o VAD antes de liberar a gravação. No modo `final`, os blocos são concatenados uma única vez e o VAD é executado pelo faster-whisper, evitando uma segunda varredura do mesmo áudio.
+O padrão é `large-v3-turbo`: em GPU NVIDIA com CUDA e `int8_float16`, em CPU com `int8`. Se o hardware não suportar essa precisão, é usada uma alternativa suportada. A decodificação usa `beam_size=5`. O aquecimento consome o gerador de transcrição e inicializa o VAD antes de liberar a gravação. No modo `final`, os blocos são concatenados uma única vez e o VAD é executado pelo faster-whisper, evitando uma segunda varredura do mesmo áudio.
 
 - `sussurro status`: informa se o modelo está pronto, se está gravando e se ainda há trabalho pendente.
 - `sussurro-performance.log`: registra duração do áudio, tempo de transcrição, tempo de entrega e tempo desde o comando de parada. Não contém áudio nem texto ditado. Rotação de 1 MB, com duas cópias anteriores.
@@ -219,7 +223,7 @@ Em Wayland, a injeção usa `wtype`; configure o atalho do compositor para execu
 - `library.json` — sua biblioteca de correções de palavras. Também fica de fora do git.
 - `sussurro.log` — log escrito quando rodando sob `pythonw`.
 
-Todos estão no `.gitignore`. Nada é enviado para serviço externo: captura, VAD, modelo e injeção de texto são 100% locais.
+Todos estão no `.gitignore`. Com modelo local, nada é enviado para serviço externo: captura, VAD, modelo e injeção de texto são 100% locais. Com ElevenLabs Scribe ou Grok, o áudio de cada trecho do ditado vai para o provedor escolhido (ou pro local, se ele falhar), assim como o do **Refazer** e o do `sussurro transcribe`, que usam o modelo atual. Reuniões, histórico, biblioteca e configurações nunca saem do PC.
 
 ## Linux — o que ainda é limitado
 

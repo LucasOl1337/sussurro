@@ -3,20 +3,18 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-PARAKEET = "parakeet-tdt-0.6b-v3"
+from sussurro_cloud import ELEVENLABS, PROVIDER_NAMES, XAI, is_cloud
+
+LOCAL_DEFAULT = "large-v3-turbo"
 
 MODEL_LABELS = {
-    "auto": "Automatico (recomendado)",
-    "tiny": "Tiny — minimo consumo",
-    "base": "Base — CPU basico",
-    "small": "Small — CPU moderno",
-    "medium": "Medium — intermediario",
-    "large-v3-turbo": "Turbo — GPU recomendado",
-    "large-v3": "Large-v3 — precisao",
-    PARAKEET: "Parakeet v3 (NVIDIA) — GPU ultrarrapido",
+    "large-v3-turbo": "Turbo · local, rápido",
+    "large-v3": "Large-v3 · local, precisão",
+    ELEVENLABS: "ElevenLabs Scribe · nuvem",
+    XAI: "Grok (xAI) · nuvem",
 }
 DEVICE_LABELS = {"auto": "Automatico", "cuda": "GPU NVIDIA", "cpu": "CPU"}
-DEFAULT_MODEL_SETTINGS = {"whisper_model": "auto", "whisper_device": "auto"}
+DEFAULT_MODEL_SETTINGS = {"whisper_model": LOCAL_DEFAULT, "whisper_device": "auto"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +25,8 @@ class ModelConfig:
 
     @property
     def label(self):
+        if self.engine == "cloud":
+            return f"{PROVIDER_NAMES[self.model]} · NUVEM"
         return f"{self.model} · {self.device.upper()} · {self.compute_type}"
 
     @property
@@ -35,12 +35,12 @@ class ModelConfig:
 
 
 def engine_of(model):
-    """Parakeet roda por onnxruntime; o resto e faster-whisper/CTranslate2."""
-    return "parakeet" if model == PARAKEET else "whisper"
+    """Nuvem vai por HTTP (sussurro_cloud); o resto e faster-whisper/CTranslate2."""
+    return "cloud" if is_cloud(model) else "whisper"
 
 
 def cache_dir(*parts) -> Path:
-    """Cache privado do Sussurro (modelos convertidos, comparacao, reunioes em andamento)."""
+    """Cache privado do Sussurro (comparacao, reunioes em andamento, modelo de vozes)."""
     override = os.environ.get('SUSSURRO_CACHE_DIR')
     if override:
         root = Path(override).expanduser()
@@ -56,19 +56,23 @@ def cache_dir(*parts) -> Path:
 
 
 def normalize_model_settings(settings):
-    """Missing/invalid choices adopt the new default; explicit choices survive updates."""
-    result = {}
-    for key, choices in (("whisper_model", MODEL_LABELS), ("whisper_device", DEVICE_LABELS)):
-        value = settings.get(key)
-        result[key] = value if isinstance(value, str) and value in choices else "auto"
-    return result
-
+    """Escolha valida sobrevive a atualizacao; Automatico, Tiny, Base, Small, Medium e
+    Parakeet (fora do seletor desde a v0.8) e qualquer valor invalido viram Turbo."""
+    model = settings.get("whisper_model")
+    device = settings.get("whisper_device")
+    return {
+        "whisper_model": model if isinstance(model, str) and model in MODEL_LABELS else LOCAL_DEFAULT,
+        "whisper_device": device if isinstance(device, str) and device in DEVICE_LABELS else "auto",
+    }
 
 
 def resolve_model_config(settings, backend=None):
+    settings = normalize_model_settings(settings)
+    model = settings["whisper_model"]
+    if is_cloud(model):
+        return ModelConfig(model, "cloud", "api")  # nao toca em CUDA nem ocupa VRAM
     if backend is None:
         import ctranslate2 as backend
-    settings = normalize_model_settings(settings)
     device = settings["whisper_device"]
     if device != "cpu":
         try:
@@ -78,14 +82,6 @@ def resolve_model_config(settings, backend=None):
         if device == "cuda" and not cuda:
             raise RuntimeError("GPU NVIDIA indisponivel. Escolha CPU ou Automatico.")
         device = "cuda" if cuda else "cpu"
-    model = settings["whisper_model"]
-    if model == "auto":
-        model = "large-v3-turbo" if device == "cuda" else "base"
-    if engine_of(model) == "parakeet":
-        # onnxruntime-gpu em FP16: Parakeet nao tem caminho de CPU no Sussurro
-        if device != "cuda":
-            raise RuntimeError("Parakeet roda so na GPU NVIDIA. Escolha GPU ou Automatico.")
-        return ModelConfig(model, device, "float16")
     supported = backend.get_supported_compute_types(device)
     candidates = ("int8_float16", "float16", "int8_float32", "float32") if device == "cuda" else ("int8", "int8_float32", "float32")
     compute = next((kind for kind in candidates if kind in supported), None)
@@ -94,9 +90,15 @@ def resolve_model_config(settings, backend=None):
     return ModelConfig(model, device, compute)
 
 
+def fallback_config(settings, backend=None):
+    """Whisper local usado quando a nuvem cai: Turbo no dispositivo escolhido."""
+    return resolve_model_config({"whisper_model": LOCAL_DEFAULT,
+                                 "whisper_device": normalize_model_settings(settings)["whisper_device"]},
+                                backend)
+
+
 def model_path(model, download):
     """Use complete cached weights offline; finish partial/first downloads on demand."""
-    from pathlib import Path
     from huggingface_hub.errors import LocalEntryNotFoundError
     try:
         path = download(model, local_files_only=True)

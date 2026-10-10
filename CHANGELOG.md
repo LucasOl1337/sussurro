@@ -4,6 +4,10 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Ditado na nuvem, opcional:** o seletor ganha **ElevenLabs Scribe** e **Grok (xAI)**. Não ocupam VRAM (o Large-v3 local prende 2,1 GB mesmo parado) e acertam mais termos técnicos: 29 e 28 de 31 nos ditados reais, contra 18 do Large-v3. Custam de 1,5 a 3 s por trecho. Credencial só por variável de ambiente, chaveiro (`secret-tool ... servico elevenlabs tipo api-key`) ou login do Grok CLI; nada vai pro `settings.json`.
+- Se a nuvem falhar, o mesmo trecho sai no Turbo local, que carrega na hora; por 60 s o ditado fica no local e depois tenta a nuvem de novo. O Turbo emprestado sai da VRAM após 2 min ocioso. Reunião continua sempre local.
+- O seletor fica só com **Turbo**, **Large-v3**, **ElevenLabs Scribe** e **Grok**. Automático, Tiny, Base, Small, Medium e Parakeet saíram; quem usava um deles passa pro Turbo. As dependências do Parakeet (`onnx-asr`, `onnx`, `onnxconverter-common`) saíram do `requirements-cuda.txt`; o cache em `~/.cache/sussurro/models/parakeet-*` pode ser apagado.
+- COMPARAR traz os modelos de nuvem desmarcados, pra nenhuma frase sair do PC sem você marcar.
 - **Refazer** no histórico dispara na hora com o modelo e o idioma atuais do Sussurro, sem abrir diálogo. Pra tentar outro motor, troca no seletor e aplica.
 - A Biblioteca não quebra mais o Refazer quando o Whisper escreve termo hifenizado (`claude-code` → `Claude Code`). O erro `KeyError: 'claude code'` nas 11h04 vinha daí.
 - Ditar com a janela do Sussurro em foco volta a só salvar no histórico, sem colar, sem erro e sem Enter automático. A v0.7.0 marcava esses ditados como falha.

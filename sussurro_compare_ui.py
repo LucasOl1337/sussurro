@@ -9,7 +9,11 @@ import customtkinter as ctk
 import numpy as np
 
 from sussurro_compare import ClipRecorder, Comparison, SAMPLE_RATE, MAX_SECONDS
-from sussurro_models import MODEL_LABELS
+from sussurro_models import MODEL_LABELS, fallback_config, is_cloud
+
+
+def short_name(model):
+    return MODEL_LABELS[model].split(' · ')[0]
 
 BG = '#1b1c20'
 FIELD = '#25262b'
@@ -38,12 +42,13 @@ class ComparisonPanel(ctk.CTkFrame):
                      text_color=MUTED, font=self.font, anchor='w').pack(fill='x', padx=16)
         choices = ctk.CTkFrame(self, fg_color='transparent')
         choices.pack(fill='x', padx=16, pady=8)
-        for i, model in enumerate(m for m in MODEL_LABELS if m != 'auto'):
-            var = ctk.BooleanVar(value=True)
-            box = ctk.CTkCheckBox(choices, text=model.replace('large-v3-turbo', 'Turbo').replace('parakeet-tdt-0.6b-v3', 'Parakeet'),
+        for i, model in enumerate(MODEL_LABELS):
+            # nuvem so com escolha explicita: marcada, a frase vai pro provedor
+            var = ctk.BooleanVar(value=not is_cloud(model))
+            box = ctk.CTkCheckBox(choices, text=short_name(model) + (' (nuvem)' if is_cloud(model) else ''),
                                  variable=var, width=140, font=self.font,
                                  fg_color=ACCENT, hover_color='#d64708')
-            box.grid(row=i // 3, column=i % 3, sticky='w', pady=4, padx=(0, 14))
+            box.grid(row=i // 2, column=i % 2, sticky='w', pady=4, padx=(0, 14))
             self.model_vars[model] = (var, box)
         options = ctk.CTkFrame(self, fg_color='transparent')
         options.pack(fill='x', padx=16)
@@ -190,6 +195,12 @@ class ComparisonPanel(ctk.CTkFrame):
         device = self.device.get()
         if device == 'Mesmo do ditado':
             config = self.host.transcriber.model_config
+            if config is not None and config.engine == 'cloud':
+                # ditado na nuvem: os locais rodam onde o Turbo de reserva rodaria
+                try:
+                    config = fallback_config({'whisper_device': self.host.transcriber._fallback_device})
+                except RuntimeError:
+                    config = None
             device = config.device if config else 'cpu'
         else:
             device = 'cpu' if device == 'CPU' else 'cuda'
@@ -199,7 +210,7 @@ class ComparisonPanel(ctk.CTkFrame):
         for model in models:
             row = ctk.CTkFrame(self.results, fg_color=FIELD)
             row.pack(fill='x', pady=(0, 8))
-            label = ctk.CTkLabel(row, text=f'{model} · Na fila', text_color=INK,
+            label = ctk.CTkLabel(row, text=f'{short_name(model)} · Na fila', text_color=INK,
                                  font=(self.host.FONT_UI, 13, 'bold'), anchor='w')
             label.pack(fill='x', padx=10, pady=(6, 0))
             metrics = ctk.CTkLabel(row, text='—', font=(self.host.FONT_MONO, 11),
@@ -231,14 +242,14 @@ class ComparisonPanel(ctk.CTkFrame):
             model = event['model']
             label, metrics, text = self.rows[model]
             if kind == 'stage':
-                label.configure(text=f'{model} · {event["stage"]}')
+                label.configure(text=f'{short_name(model)} · {event["stage"]}')
             elif kind == 'cancelled':
-                label.configure(text=f'{model} · Cancelado')
+                label.configure(text=f'{short_name(model)} · Cancelado')
             elif kind == 'result':
                 error = event.get('error')
                 if error and ('out of memory' in error.lower() or 'alloc_failed' in error.lower()):
                     error = 'Memoria insuficiente. Tente Individual, CPU ou libere memoria de outros apps.\n' + error
-                label.configure(text=f'{model} · ' + ('Falhou' if error else event['device'].upper() + ' · ' + event['compute_type']))
+                label.configure(text=f'{short_name(model)} · ' + ('Falhou' if error else event['device'].upper() + ' · ' + event['compute_type']))
                 if not error:
                     metrics.configure(text=f'Transcricao: {event["infer_s"]:.3f} s · Carga: {event["load_s"]:.2f} s · Total: {event["elapsed_s"]:.2f} s\n'
                                            f'Preparo/download: {event["prep_s"]:.2f} s · Audio: {event["audio_s"]:.1f} s')

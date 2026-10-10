@@ -254,8 +254,9 @@ def recognize(model, audio, language, progress=None, abort=None, hotwords=None):
         segments, info = model.transcribe(audio, language=lang, beam_size=5, word_timestamps=True,
                                           vad_filter=True, initial_prompt=PROMPTS.get(lang),
                                           hotwords=hotwords)
-    else:  # ParakeetModel e qualquer adaptador com a mesma cara
-        segments, info = model.transcribe(audio, language=lang, vad_filter=True, word_timestamps=True)
+    else:  # CloudModel (bench pela linha de comando) e qualquer adaptador com a mesma cara
+        segments, info = model.transcribe(audio, language=lang, vad_filter=True, word_timestamps=True,
+                                          hotwords=hotwords)
     words = []
     for index, seg in enumerate(segments):
         _check(abort)
@@ -640,14 +641,17 @@ def load_track(path):
 
 
 def load_cli_model(name):
-    """Modelo para a linha de comando (bench): sempre na GPU."""
+    """Modelo para a linha de comando (bench): local sempre na GPU; nuvem so quando pedida
+    pelo nome (cloud-elevenlabs, cloud-xai), pra medir contra os locais nos mesmos casos."""
+    from sussurro_models import resolve_model_config, model_path
+    if name in ("cloud-elevenlabs", "cloud-xai"):
+        from sussurro_cloud import CloudModel
+        model = CloudModel(name, fallback=False)
+        model.check()
+        return model
     from sussurro_cuda import _prepare_cuda_libs
     _prepare_cuda_libs()
-    from sussurro_models import resolve_model_config, model_path
     config = resolve_model_config({"whisper_model": name, "whisper_device": "cuda"})
-    if config.engine == "parakeet":
-        import sussurro_parakeet
-        return sussurro_parakeet.ParakeetModel(sussurro_parakeet.model_dir())
     from faster_whisper import WhisperModel
     from faster_whisper.utils import download_model
     return WhisperModel(model_path(config.model, download_model), device=config.device,

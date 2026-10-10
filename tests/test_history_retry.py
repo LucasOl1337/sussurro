@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 import app
-from sussurro_models import ModelConfig, PARAKEET
+from sussurro_models import ModelConfig
+from sussurro_cloud import ELEVENLABS
 
 
 class HistoryRetryTests(unittest.TestCase):
@@ -19,7 +20,7 @@ class HistoryRetryTests(unittest.TestCase):
         with patch.object(threading.Thread, 'start'), patch.object(app.keyboard, 'Controller'):
             self.t = app.Transcriber(queue.Queue(), queue.Queue())
         self.t.model = Mock()
-        self.original = ModelConfig('base', 'cpu', 'int8')
+        self.original = ModelConfig('large-v3-turbo', 'cpu', 'int8')
         self.t.model_config = self.original
         self.audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * .05
         self.segment = SimpleNamespace(text=' texto corrigido', start=0., end=1.)
@@ -61,7 +62,7 @@ class HistoryRetryTests(unittest.TestCase):
         self.assertEqual(updated['wav'], self.entry['wav'])
         self.assertEqual(updated['ts'], self.entry['ts'])
         self.assertEqual(updated['fix'], 1)
-        self.assertEqual(updated['model'], 'base')
+        self.assertEqual(updated['model'], 'large-v3-turbo')
         self.assertEqual(updated['language'], 'en')
         self.assertNotIn('retrying', updated)
         self.assertNotIn('failed', updated)
@@ -107,7 +108,7 @@ class HistoryRetryTests(unittest.TestCase):
         with patch.object(app.threading, 'Thread') as thread:
             self.t.retry_history_async(self.entry, selection, 'auto')
             args = thread.call_args.kwargs['args']
-            selection['whisper_model'] = 'tiny'
+            selection['whisper_model'] = 'large-v3-turbo'
             self.t.language = 'en'
             self.assertEqual(args[2]['whisper_model'], 'large-v3')
             self.assertEqual(args[3], 'auto')
@@ -142,7 +143,7 @@ class HistoryRetryTests(unittest.TestCase):
         self.assertEqual(self.t._meeting_jobs, 0)
 
     def test_temporary_engine_restores_previous_after_success_or_failure(self):
-        config = ModelConfig(PARAKEET, 'cuda', 'float16')
+        config = ModelConfig(ELEVENLABS, 'cloud', 'api')
         for fail in (False, True):
             with self.subTest(fail=fail):
                 models, loaded = [], []
@@ -161,6 +162,7 @@ class HistoryRetryTests(unittest.TestCase):
                     self.t.model = model
                     self.t.model_config = choice
                 with patch.object(self.t, '_weights', return_value='/cache') as weights, \
+                     patch.object(app, 'require_credentials'), \
                      patch.object(self.t, '_load_model_config', side_effect=load), \
                      patch.object(app, 'drop_hallucinations', side_effect=lambda segments, audio: segments):
                     if fail:
@@ -183,7 +185,7 @@ class HistoryRetryTests(unittest.TestCase):
         weights.assert_not_called()
 
     def test_restoration_failure_keeps_original_text_and_marks_model_unavailable(self):
-        config = ModelConfig('small', 'cpu', 'int8')
+        config = ModelConfig('large-v3', 'cpu', 'int8')
         def load(choice, path):
             if choice == self.original:
                 raise RuntimeError('carga falhou')
@@ -194,7 +196,7 @@ class HistoryRetryTests(unittest.TestCase):
              patch.object(self.t, '_weights', return_value='/cache'), \
              patch.object(self.t, '_load_model_config', side_effect=load), \
              patch.object(app, 'drop_hallucinations', side_effect=lambda segments, audio: segments):
-            self.t._retry_history_worker(self.entry, self.path, {'whisper_model': 'small'})
+            self.t._retry_history_worker(self.entry, self.path, {'whisper_model': 'large-v3'})
         self.assertEqual(self.rows()[0]['text'], self.entry['text'])
         self.assertIn('Aplicar modelo', self.rows()[0]['retry_error'])
         self.assertIsNone(self.t.model)

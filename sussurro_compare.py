@@ -214,24 +214,22 @@ def worker(model_name, device, language, path):
         from sussurro_models import resolve_model_config, model_path
         config = resolve_model_config({'whisper_model': model_name, 'whisper_device': device})
         emit(event='stage', stage='Baixando ou lendo cache...')
-        if config.engine == 'parakeet':
-            import sussurro_parakeet
-            weights = sussurro_parakeet.model_dir()
-        else:
-            weights = model_path(model_name, download_model)
+        weights = None if config.engine == 'cloud' else model_path(model_name, download_model)
         with wave.open(path) as wav:
             assert wav.getframerate() == SAMPLE_RATE and wav.getnchannels() == 1 and wav.getsampwidth() == 2
             audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2').astype(np.float32) / 32768
         prep_s = time.perf_counter() - prep_start
         emit(event='stage', stage='Carregando e aquecendo...')
         start = time.perf_counter()
-        if config.engine == 'parakeet':
-            model = sussurro_parakeet.ParakeetModel(weights)
+        if config.engine == 'cloud':
+            from sussurro_cloud import CloudModel
+            model = CloudModel(model_name, fallback=False)  # a linha mostra so este provedor
+            model.check()  # aquecer mandaria silencio pra nuvem a toa
         else:
             model = WhisperModel(weights, device=config.device, compute_type=config.compute_type)
-        segments, _ = model.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32),
-                                      language='pt', beam_size=5, vad_filter=False)
-        list(segments)
+            segments, _ = model.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32),
+                                          language='pt', beam_size=5, vad_filter=False)
+            list(segments)
         from faster_whisper.vad import get_speech_timestamps, VadOptions
         get_speech_timestamps(np.zeros(SAMPLE_RATE, dtype=np.float32), VadOptions())
         load_s = time.perf_counter() - start

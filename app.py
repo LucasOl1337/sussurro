@@ -86,9 +86,9 @@ from faster_whisper.utils import download_model
 from sussurro_audio import prepare_input_devices
 from sussurro_hardware import (detect_hardware, execution_device_labels,
                                execution_hardware_note)
-from sussurro_models import (MODEL_LABELS, DEFAULT_MODEL_SETTINGS,
+from sussurro_models import (MODEL_LABELS, DEFAULT_MODEL_SETTINGS, fallback_config,
                              normalize_model_settings, resolve_model_config, model_path)
-import sussurro_parakeet
+from sussurro_cloud import CloudError, CloudModel, require_credentials
 import sussurro_sounds
 from sussurro_meeting import drop_hallucinations
 from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -185,6 +185,10 @@ HIST_RENDER_MAX = 200  # linhas desenhadas na aba HISTORICO (a memoria guarda tu
 # Falha CUDA repetida descarta o modelo; o app recarrega sozinho (VRAM costuma voltar em segundos).
 CUDA_DISCARD_STATUS = "ERRO: modelo descartado apos falha CUDA. Recarregando sozinho em instantes."
 MODEL_RECOVERY_DELAY_MS = 5000
+# Nuvem caiu: os proximos trechos vao direto pro Turbo local por um minuto (sem esperar o
+# timeout de novo), e o Turbo emprestado sai da VRAM depois de dois minutos parado.
+CLOUD_RETRY_S = 60.0
+LOCAL_IDLE_S = 120.0
 
 DEFAULT_SETTINGS = {
     **DEFAULT_MODEL_SETTINGS,
@@ -961,6 +965,11 @@ class Transcriber:
         self.status_queue = status_queue
         self.model = None
         self.model_config = None
+        self._local = None            # Turbo emprestado: nuvem caiu ou reuniao com modelo de nuvem
+        self._local_config = None
+        self._local_used = 0.0
+        self._fallback_device = "auto"
+        self._cloud_down_until = 0.0
         self.model_loading = threading.Event()
         self.comparing = threading.Event()
         self.library = Library()
@@ -1010,6 +1019,7 @@ class Transcriber:
         threading.Thread(target=self._transcribe_loop, daemon=True).start()
         threading.Thread(target=self._delivery_loop, daemon=True).start()
         threading.Thread(target=self._mixer_loop, daemon=True).start()
+        threading.Thread(target=self._local_reaper, daemon=True).start()
 
     # -- modelo -------------------------------------------------------------
     def load_model(self, settings=None):
@@ -1021,24 +1031,77 @@ class Transcriber:
                     if (self.comparing.is_set() or self._file_jobs or self._meeting_jobs or self._pending
                             or self.recording.is_set() or not self._drained or self._retrying.is_set()):
                         raise RuntimeError("Aguarde o trabalho atual terminar antes de trocar o modelo.")
-                config = resolve_model_config(settings or DEFAULT_MODEL_SETTINGS)
+                settings = normalize_model_settings(settings or DEFAULT_MODEL_SETTINGS)
+                config = resolve_model_config(settings)
                 self._replace_model_locked(config)
+                self._fallback_device = settings["whisper_device"]
+                self._cloud_down_until = 0.0
         finally:
             self.model_loading.clear()
 
+    def _is_cloud_locked(self):
+        return self.model_config is not None and self.model_config.engine == "cloud"
+
     def _clear_model_locked(self):
-        if self.model_config is not None and self.model_config.engine == "parakeet" and self.model is not None:
-            self.model.close()  # sessoes do onnxruntime nao somem so com gc
+        if self._is_cloud_locked() and self.model is not None:
+            self.model.close()  # fecha o pool HTTP
         self.model = None
         self.model_config = None
         gc.collect()
 
+    def _release_local_locked(self):
+        if self._local is not None:
+            self._local = None
+            self._local_config = None
+            gc.collect()
+            _perf("local_fallback_released")
+
+    def _borrow_local_locked(self):
+        """Turbo local para quando o modelo escolhido e de nuvem: carrega na hora e fica
+        ate LOCAL_IDLE_S sem uso (o _local_reaper solta a VRAM)."""
+        if self._local is None:
+            config = fallback_config({"whisper_device": self._fallback_device})
+            self.status_queue.put(f"Carregando {config.model} local...")
+            t0 = time.perf_counter()
+            self._local = WhisperModel(model_path(config.model, download_model), device=config.device,
+                                       compute_type=config.compute_type)
+            self._local_config = config
+            _perf("local_fallback_loaded", model=config.model, device=config.device,
+                  load_s=round(time.perf_counter() - t0, 3))
+        self._local_used = time.monotonic()
+        return self._local
+
+    def _local_reaper(self):
+        while True:
+            time.sleep(10)
+            if (self._local is None or self._meeting_jobs
+                    or time.monotonic() - self._local_used < LOCAL_IDLE_S):
+                continue
+            if self._model_lock.acquire(blocking=False):
+                try:
+                    if not self._meeting_jobs and time.monotonic() - self._local_used >= LOCAL_IDLE_S:
+                        self._release_local_locked()
+                finally:
+                    self._model_lock.release()
+
+    def meeting_model(self):
+        """Reuniao roda sempre local (horas de audio, palavras com tempo e idioma por trecho):
+        com modelo de nuvem no ditado, empresta o Turbo. Chamar com o job de reuniao aberto."""
+        with self._model_lock:
+            if self._is_cloud_locked():
+                return self._borrow_local_locked(), self._local_config
+            return self.model, self.model_config
+
     def _replace_model_locked(self, config):
         """Chamador segura _model_lock; nunca mantem dois modelos na VRAM."""
-        self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
+        if config.engine != "cloud":
+            self.status_queue.put(f"Preparando {config.model}: primeiro uso pode baixar o modelo...")
         path = self._weights(config)  # falha no download preserva o modelo atual
         previous = self.model_config
+        if config.engine == "cloud":
+            require_credentials(config.model)  # sem credencial: mantem o modelo atual
         self._clear_model_locked()
+        self._release_local_locked()
         try:
             self._load_model_config(config, path)
         except Exception:
@@ -1051,8 +1114,8 @@ class Transcriber:
             raise
 
     def _weights(self, config, local_only=False):
-        if config.engine == "parakeet":
-            return sussurro_parakeet.model_dir(download=not local_only, status=self.status_queue.put)
+        if config.engine == "cloud":
+            return None
         if local_only:
             return download_model(config.model, local_files_only=True)
         return model_path(config.model, download_model)
@@ -1060,10 +1123,17 @@ class Transcriber:
     def _load_model_config(self, config, path):
         self.status_queue.put(f"Carregando {config.label}...")
         t0 = time.perf_counter()
-        if config.engine == "parakeet":
-            model = sussurro_parakeet.ParakeetModel(path)
-        else:
-            model = WhisperModel(path, device=config.device, compute_type=config.compute_type)
+        if config.engine == "cloud":
+            model = CloudModel(config.model)
+            model.check()
+            get_speech_timestamps(np.zeros(SAMPLE_RATE, dtype=np.float32), VAD_OPTIONS)
+            self.model = model
+            self.model_config = config
+            _perf("model_ready", device=config.device, model=config.model, load_s=0)
+            self.status_queue.put(f"{config.label} pronto. Pode gravar. "
+                                  "O audio do ditado vai pra nuvem; reuniao continua local.")
+            return
+        model = WhisperModel(path, device=config.device, compute_type=config.compute_type)
         try:
             silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
             segments, _ = model.transcribe(silence, language="pt", beam_size=5)
@@ -1071,10 +1141,7 @@ class Transcriber:
             get_speech_timestamps(silence, VAD_OPTIONS)
         except Exception:
             # Explicitly free failed weights before attempting to recover the old model.
-            if config.engine == "parakeet":
-                model.close()
-            else:
-                model.model.unload_model()
+            model.model.unload_model()
             raise
         self.model = model
         self.model_config = config
@@ -1585,6 +1652,8 @@ class Transcriber:
                 self._replace_model_locked(config)
             unavailable = False
             try:
+                if self._is_cloud_locked():
+                    return self._transcribe_cloud_locked(audio, language, vad_filter)
                 for attempt in range(2):
                     try:
                         segments, info = self.model.transcribe(
@@ -1624,6 +1693,31 @@ class Transcriber:
                     except Exception as error:
                         raise RuntimeError("Nao foi possivel restaurar o modelo do ditado. "
                                            "Clique em Aplicar modelo para carrega-lo novamente.") from error
+
+    def _transcribe_cloud_locked(self, audio, language, vad_filter):
+        """Nuvem primeiro; se os dois provedores falharem, o mesmo trecho sai no Turbo local
+        e os proximos vao direto pra ele por CLOUD_RETRY_S (sem pagar o timeout de novo)."""
+        if time.monotonic() >= self._cloud_down_until:
+            try:
+                segments, info = self.model.transcribe(audio, language=language,
+                                                       hotwords=self.library.hotwords)
+                if self._cloud_down_until:
+                    self._cloud_down_until = 0.0
+                    self.status_queue.put(f"{self.model_config.label} voltou.")
+                _perf("cloud_segment", provider=self.model.last_provider,
+                      audio_s=round(audio.size / SAMPLE_RATE, 3))
+                return drop_hallucinations(list(segments), audio), info
+            except CloudError as error:
+                self._cloud_down_until = time.monotonic() + CLOUD_RETRY_S
+                _perf("cloud_failed", error=str(error)[:200])
+                self.status_queue.put(f"Nuvem indisponivel ({error}). Usando o Turbo local por enquanto.")
+        local = self._borrow_local_locked()
+        try:
+            segments, info = local.transcribe(audio, language=language, beam_size=5, vad_filter=vad_filter,
+                                              hotwords=self.library.hotwords)
+            return drop_hallucinations(list(segments), audio), info
+        finally:
+            self._local_used = time.monotonic()
 
     @staticmethod
     def _audio_diagnosis(audio):
@@ -3302,9 +3396,10 @@ class App:
                       command=self._on_sounds, text_color=INK_2,
                       progress_color=ACCENT, font=(self.FONT_UI, 11)).grid(
             row=9, column=0, columnspan=3, sticky="w", padx=CPAD, pady=(0, CPAD))
-        ctk.CTkLabel(card, text="CPU básico: Base · CPU moderno: Small · GPU NVIDIA: Turbo · "
-                               "Large-v3 prioriza precisão.\nParakeet (só GPU): o mais rápido, sem idioma fixo; "
-                               "em português às vezes escorrega pro inglês.\n" + execution_hardware_note(self.hardware),
+        ctk.CTkLabel(card, text="Turbo e Large-v3 rodam no PC: nenhum áudio sai daqui. Large-v3 prioriza precisão.\n"
+                               "Nuvem (ElevenLabs, Grok) acerta mais termos e não ocupa VRAM, mas manda o áudio "
+                               "do ditado pro provedor.\nSe a nuvem cair, o trecho sai no Turbo local; reunião é sempre local.\n"
+                               + execution_hardware_note(self.hardware),
                      text_color=INK_3, font=(self.FONT_UI, 11), anchor="w", justify="left").grid(
             row=8, column=0, columnspan=3, sticky="ew", padx=CPAD, pady=(12, CPAD))
 

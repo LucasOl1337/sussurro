@@ -17,7 +17,7 @@ class CudaRecoveryTests(unittest.TestCase):
     def setUp(self):
         with patch.object(threading.Thread, 'start'), patch.object(app.keyboard, 'Controller'):
             self.t = app.Transcriber(queue.Queue(), queue.Queue())
-        self.config = ModelConfig('base', 'cuda', 'float16')
+        self.config = ModelConfig('large-v3-turbo', 'cuda', 'float16')
         self.t.model_config = self.config
         self.t.model = Mock()
         self.audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * .05
@@ -163,7 +163,7 @@ class CudaRecoveryTests(unittest.TestCase):
                 loading.assert_called_once()
 
     def test_cpu_oom_does_not_trigger_cuda_recovery(self):
-        self.t.model_config = ModelConfig('base', 'cpu', 'int8')
+        self.t.model_config = ModelConfig('large-v3-turbo', 'cpu', 'int8')
         self.t.model.transcribe.side_effect = RuntimeError('out of memory')
         with patch.object(self.t, '_load_model_config') as loading:
             with self.assertRaisesRegex(RuntimeError, 'out of memory'):
@@ -185,7 +185,7 @@ class CudaRecoveryTests(unittest.TestCase):
         self.assertIsNone(self.t.model_config)
 
     def test_temporary_cuda_double_failure_does_not_restore_and_claim_ready(self):
-        temporary = ModelConfig('small', 'cuda', 'float16')
+        temporary = ModelConfig('large-v3', 'cuda', 'float16')
         loaded = []
         def load(config, path):
             loaded.append(config)

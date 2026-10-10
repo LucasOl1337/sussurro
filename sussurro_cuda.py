@@ -10,7 +10,7 @@ def _prepare_cuda_libs():
     """Expõe cublas/cudnn do wheel NVIDIA ao carregador nativo (DLL no Windows, .so no Linux)."""
     dirs = []
     # cublas/cudnn/nvrtc: CTranslate2 (Whisper). runtime/cufft/curand/nvjitlink: onnxruntime-gpu
-    # (Parakeet e diarizacao). Pacote ausente e so pulado: instalacao so-Whisper segue valendo.
+    # (diarizacao das reunioes). Pacote ausente e so pulado: instalacao so-Whisper segue valendo.
     for name in ("nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc", "nvidia.cuda_runtime",
                  "nvidia.nvjitlink", "nvidia.cufft", "nvidia.curand"):
         try:

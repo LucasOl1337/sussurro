@@ -396,7 +396,9 @@ class MeetingPanel(ctk.CTkFrame):
         """Transcreve a pasta (gravacao com duas trilhas ou arquivo importado) e grava o resultado."""
         manifest = rec.read_manifest(folder)
         transcriber = self.host.transcriber
-        model, lock = transcriber.model, transcriber._model_lock
+        # modelo de nuvem no ditado: a reuniao empresta o Turbo local (nada sai do PC)
+        model, config = transcriber.meeting_model()
+        lock = transcriber._model_lock
         language = manifest.get('language', 'pt')
         started = time.perf_counter()
         if manifest.get('imported'):
@@ -412,7 +414,6 @@ class MeetingPanel(ctk.CTkFrame):
                                                     hotwords=transcriber.library.hotwords)
         for line in transcript.lines:
             line.text, _ = transcriber.library.apply(line.text)  # Biblioteca tambem vale aqui
-        config = transcriber.model_config
         manifest.update(duration_secs=transcript.duration_secs, language=language,
                         detected_language=transcript.language, model=config.label if config else None,
                         transcribe_s=round(time.perf_counter() - started, 1),

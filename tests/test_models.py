@@ -3,13 +3,18 @@ import json
 import queue
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 import app
-from sussurro_models import PARAKEET, ModelConfig, normalize_model_settings, resolve_model_config, model_path
+from sussurro_cloud import ELEVENLABS, XAI, CloudError
+from sussurro_models import (ModelConfig, fallback_config, normalize_model_settings, resolve_model_config,
+                             model_path)
 
 
 class ModelSettingsTests(unittest.TestCase):
@@ -29,14 +34,33 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertEqual(resolve_model_config(settings, self.backend()),
                          ModelConfig('large-v3-turbo', 'cuda', 'int8_float16'))
 
-    def test_no_gpu_selects_base_int8(self):
-        self.assertEqual(resolve_model_config({}, self.backend(0)), ModelConfig('base', 'cpu', 'int8'))
+    def test_no_gpu_runs_turbo_int8_on_cpu(self):
+        self.assertEqual(resolve_model_config({}, self.backend(0)), ModelConfig('large-v3-turbo', 'cpu', 'int8'))
 
     def test_explicit_cpu_does_not_probe_cuda(self):
         backend = self.backend()
-        self.assertEqual(resolve_model_config({'whisper_device': 'cpu', 'whisper_model': 'small'}, backend),
-                         ModelConfig('small', 'cpu', 'int8'))
+        self.assertEqual(resolve_model_config({'whisper_device': 'cpu', 'whisper_model': 'large-v3'}, backend),
+                         ModelConfig('large-v3', 'cpu', 'int8'))
         backend.get_cuda_device_count.assert_not_called()
+
+    def test_removed_models_migrate_to_turbo_keeping_device(self):
+        for old in ('auto', 'tiny', 'large-v3-turbo', 'small', 'medium', 'parakeet-tdt-0.6b-v3'):
+            with self.subTest(old=old):
+                self.assertEqual(normalize_model_settings({'whisper_model': old, 'whisper_device': 'cpu'}),
+                                 {'whisper_model': 'large-v3-turbo', 'whisper_device': 'cpu'})
+
+    def test_cloud_never_touches_cuda(self):
+        backend = self.backend()
+        for provider in (ELEVENLABS, XAI):
+            with self.subTest(provider=provider):
+                config = resolve_model_config({'whisper_model': provider, 'whisper_device': 'cuda'}, backend)
+                self.assertEqual((config.engine, config.device), ('cloud', 'cloud'))
+                self.assertIn('NUVEM', config.label)
+        backend.get_cuda_device_count.assert_not_called()
+
+    def test_cloud_fallback_is_local_turbo_on_chosen_device(self):
+        self.assertEqual(fallback_config({'whisper_model': XAI, 'whisper_device': 'cpu'}, self.backend()),
+                         ModelConfig('large-v3-turbo', 'cpu', 'int8'))
 
     def test_explicit_gpu_reports_unavailable(self):
         with self.assertRaisesRegex(RuntimeError, 'CPU'):
@@ -63,14 +87,14 @@ class ModelSettingsTests(unittest.TestCase):
 
     def test_invalid_preferences_recover_to_defaults(self):
         self.assertEqual(normalize_model_settings({'whisper_model': [], 'whisper_device': {'invalid': True}}),
-                         {'whisper_model': 'auto', 'whisper_device': 'auto'})
+                         {'whisper_model': 'large-v3-turbo', 'whisper_device': 'auto'})
 
 
 class ModelReplacementTests(unittest.TestCase):
     def setUp(self):
         with patch.object(threading.Thread, 'start'), patch.object(app.keyboard, 'Controller'):
             self.t = app.Transcriber(queue.Queue(), queue.Queue())
-        self.old = ModelConfig('base', 'cpu', 'int8')
+        self.old = ModelConfig('large-v3', 'cpu', 'int8')
         self.new = ModelConfig('large-v3-turbo', 'cuda', 'int8_float16')
         self.t.model = Mock()
         self.t.model_config = self.old
@@ -102,7 +126,7 @@ class ModelReplacementTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'memory'):
                 self.t.load_model({})
         self.assertEqual(calls, [self.new, self.old])
-        download.assert_called_with('base', local_files_only=True)
+        download.assert_called_with('large-v3', local_files_only=True)
         self.assertEqual(self.t.model_config, self.old)
         self.assertFalse(self.t.model_loading.is_set())
 
@@ -130,7 +154,7 @@ class ModelReplacementTests(unittest.TestCase):
         self.assertFalse(status['ready'])
         self.assertTrue(status['loading'])
         self.assertEqual(status['device'], 'cpu')
-        self.assertEqual(status['model'], 'base')
+        self.assertEqual(status['model'], 'large-v3')
 
     def test_ui_refuses_switch_during_recording(self):
         self.t.recording.set()
@@ -142,12 +166,12 @@ class ModelReplacementTests(unittest.TestCase):
         ui = SimpleNamespace(transcriber=self.t, settings={'language': 'pt'}, _save=Mock(),
                              model_label=Mock(), record_btn=Mock(), apply_model_btn=Mock(),
                              model_choice=Mock(), device_choice=Mock(), status_queue=queue.Queue())
-        selection = {'whisper_model': 'small', 'whisper_device': 'cpu'}
+        selection = {'whisper_model': ELEVENLABS, 'whisper_device': 'cpu'}
         app.App._model_load_done(ui, selection, True, 'failure')
         ui._save.assert_not_called()
         app.App._model_load_done(ui, selection, True, None)
         ui._save.assert_called_once()
-        self.assertEqual(ui.settings['whisper_model'], 'small')
+        self.assertEqual(ui.settings['whisper_model'], ELEVENLABS)
         self.assertEqual(ui.settings['language'], 'pt')
 
     def test_file_decoding_is_busy_and_clears_after_failure(self):
@@ -177,77 +201,125 @@ class ModelCacheTests(unittest.TestCase):
             for name in ('model.bin', 'config.json', 'tokenizer.json'):
                 (Path(folder) / name).write_bytes(b'test')
             download = Mock(return_value=folder)
-            self.assertEqual(model_path('base', download), folder)
-            download.assert_called_once_with('base', local_files_only=True)
+            self.assertEqual(model_path('large-v3-turbo', download), folder)
+            download.assert_called_once_with('large-v3-turbo', local_files_only=True)
 
     def test_partial_cache_completes_download(self):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / 'config.json').write_text('{}')
             download = Mock(return_value=folder)
-            model_path('base', download)
+            model_path('large-v3-turbo', download)
             self.assertEqual(download.call_count, 2)
-            download.assert_called_with('base')
+            download.assert_called_with('large-v3-turbo')
 
     def test_first_use_downloads_model(self):
         from huggingface_hub.errors import LocalEntryNotFoundError
         download = Mock(side_effect=[LocalEntryNotFoundError('missing'), '/downloaded'])
-        self.assertEqual(model_path('base', download), '/downloaded')
+        self.assertEqual(model_path('large-v3-turbo', download), '/downloaded')
 
 
-class ParakeetTests(unittest.TestCase):
-    def backend(self, cuda=1):
-        return SimpleNamespace(get_cuda_device_count=Mock(return_value=cuda),
-                               get_supported_compute_types=Mock(return_value={'int8_float16'}))
+class CloudTranscriberTests(unittest.TestCase):
+    """Nuvem no ditado: sem pesos na VRAM, Turbo local so quando a nuvem cai ou na reuniao."""
 
-    def test_parakeet_runs_on_gpu_in_fp16(self):
-        config = resolve_model_config({'whisper_model': PARAKEET, 'whisper_device': 'auto'}, self.backend())
-        self.assertEqual(config, ModelConfig(PARAKEET, 'cuda', 'float16'))
-        self.assertEqual(config.engine, 'parakeet')
-        self.assertEqual(ModelConfig('large-v3', 'cuda', 'int8_float16').engine, 'whisper')
+    def setUp(self):
+        with patch.object(threading.Thread, 'start'), patch.object(app.keyboard, 'Controller'):
+            self.t = app.Transcriber(queue.Queue(), queue.Queue())
+        self.cloud = Mock()
+        self.cloud.last_provider = ELEVENLABS
+        self.t.model = self.cloud
+        self.t.model_config = ModelConfig(ELEVENLABS, 'cloud', 'api')
+        self.audio = np.ones(app.SAMPLE_RATE, dtype=np.float32) * .05
+        self.segment = SimpleNamespace(text=' oi', start=0., end=1., no_speech_prob=0.)
+        for target in ('_perf', 'drop_hallucinations'):
+            patcher = patch.object(app, target, side_effect=(lambda segments, audio: segments)
+                                   if target == 'drop_hallucinations' else None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def test_parakeet_refuses_cpu(self):
-        with self.assertRaisesRegex(RuntimeError, 'GPU'):
-            resolve_model_config({'whisper_model': PARAKEET, 'whisper_device': 'cpu'}, self.backend())
-        with self.assertRaisesRegex(RuntimeError, 'GPU'):
-            resolve_model_config({'whisper_model': PARAKEET, 'whisper_device': 'auto'}, self.backend(0))
+    def local(self):
+        model = Mock()
+        model.transcribe.return_value = (iter([self.segment]), None)
+        return model
 
-    def test_tokens_become_words_with_times(self):
-        from sussurro_parakeet import words_from_tokens
-        words = words_from_tokens([' No', ' Da', 'ily', ' W', 'ork', ','], [0.08, 0.32, 0.48, 0.72, 0.8, 0.96],
-                                  [0.0] * 6, offset=10.0, end=11.2)
-        self.assertEqual([w.word for w in words], [' No', ' Daily', ' Work,'])
-        self.assertAlmostEqual(words[1].start, 10.32)
-        self.assertAlmostEqual(words[1].end, 10.72)
-        self.assertAlmostEqual(words[2].end, 11.04)
+    def test_cloud_answer_never_loads_local_weights(self):
+        self.cloud.transcribe.return_value = ([self.segment], None)
+        with patch.object(app, 'WhisperModel') as whisper:
+            segments, _ = self.t._transcribe_locked(self.audio, language='pt', vad_filter=False)
+        self.assertEqual(segments, [self.segment])
+        whisper.assert_not_called()
+        self.assertIsNone(self.t._local)
 
-    def test_batches_bound_padded_audio(self):
-        from sussurro_parakeet import batches, SAMPLE_RATE, BATCH_SECONDS
-        chunks = [(0, s * SAMPLE_RATE) for s in (30, 2, 29, 5, 1, 30, 12)]
-        groups = list(batches(chunks))
-        self.assertEqual(sorted(i for g in groups for i in g), list(range(len(chunks))))
-        for g in groups:
-            longest = max(chunks[i][1] for i in g)
-            self.assertTrue(len(g) == 1 or longest * len(g) <= BATCH_SECONDS * SAMPLE_RATE)
+    def test_cloud_failure_falls_back_to_turbo_and_skips_cloud_for_a_while(self):
+        self.cloud.transcribe.side_effect = CloudError('sem rede')
+        local = self.local()
+        with patch.object(app, 'WhisperModel', return_value=local) as whisper, \
+             patch.object(app, 'model_path', return_value='/cache'), \
+             patch.object(app, 'fallback_config', return_value=ModelConfig('large-v3-turbo', 'cuda', 'int8_float16')):
+            segments, _ = self.t._transcribe_locked(self.audio, language='pt', vad_filter=True)
+            self.assertEqual(segments, [self.segment])
+            local.transcribe.return_value = (iter([self.segment]), None)
+            self.t._transcribe_locked(self.audio, language='pt', vad_filter=True)
+        self.assertEqual(self.cloud.transcribe.call_count, 1)  # segundo trecho nem tenta a nuvem
+        whisper.assert_called_once()                            # Turbo carregado uma vez so
+        self.assertEqual(local.transcribe.call_count, 2)
+        self.assertIn('Turbo local', self.t.status_queue.get_nowait())
 
-    def test_adapter_offsets_segments_and_skips_empty(self):
-        import numpy as np
-        import sussurro_parakeet as pk
-        result = lambda text, tokens, times: SimpleNamespace(text=text, tokens=tokens, timestamps=times,
-                                                             logprobs=[0.0] * len(tokens))
-        model = pk.ParakeetModel.__new__(pk.ParakeetModel)
-        model._asr = SimpleNamespace(recognize=lambda chunks: [
-            result('Oi.', [' Oi', '.'], [0.1, 0.3]) if c.size > pk.SAMPLE_RATE else result('', [], [])
-            for c in chunks])
-        audio = np.zeros(pk.SAMPLE_RATE * 6, dtype=np.float32)
-        spans = [(0, pk.SAMPLE_RATE // 2), (2 * pk.SAMPLE_RATE, 4 * pk.SAMPLE_RATE)]
-        with patch.object(pk, 'speech_chunks', return_value=spans):
-            segments, info = model.transcribe(audio, language='pt', vad_filter=True, word_timestamps=True)
-        self.assertEqual(len(segments), 1)
-        self.assertEqual(segments[0].text, ' Oi.')
-        self.assertAlmostEqual(segments[0].start, 2.1)
-        self.assertEqual([w.word for w in segments[0].words], [' Oi.'])
-        self.assertEqual(info.duration, 6)
+    def test_cloud_is_retried_after_cooldown_and_announces_recovery(self):
+        self.t._cloud_down_until = time.monotonic() - 1
+        self.cloud.transcribe.return_value = ([self.segment], None)
+        self.t._transcribe_locked(self.audio, language='pt', vad_filter=False)
+        self.assertEqual(self.t._cloud_down_until, 0.0)
+        self.assertIn('voltou', self.t.status_queue.get_nowait())
 
-    def test_neighbouring_speech_shares_one_window(self):
-        from sussurro_parakeet import merge_spans
-        self.assertEqual(merge_spans([(0, 5), (7, 12), (14, 30), (31, 33)], 20), [(0, 12), (14, 33)])
+    def test_idle_local_fallback_is_released(self):
+        self.t._local = Mock()
+        self.t._local_config = ModelConfig('large-v3-turbo', 'cuda', 'int8_float16')
+        self.t._local_used = time.monotonic() - app.LOCAL_IDLE_S - 1
+        with patch.object(app.time, 'sleep', side_effect=[None, StopIteration]):
+            with self.assertRaises(StopIteration):
+                self.t._local_reaper()
+        self.assertIsNone(self.t._local)
+
+    def test_meeting_keeps_local_fallback_alive(self):
+        self.t._local = Mock()
+        self.t._local_used = time.monotonic() - app.LOCAL_IDLE_S - 1
+        self.t.begin_meeting_job()
+        with patch.object(app.time, 'sleep', side_effect=[None, StopIteration]):
+            with self.assertRaises(StopIteration):
+                self.t._local_reaper()
+        self.assertIsNotNone(self.t._local)
+
+    def test_meeting_uses_local_turbo_when_dictation_is_cloud(self):
+        local = self.local()
+        config = ModelConfig('large-v3-turbo', 'cpu', 'int8')
+        with patch.object(app, 'WhisperModel', return_value=local), \
+             patch.object(app, 'model_path', return_value='/cache'), \
+             patch.object(app, 'fallback_config', return_value=config):
+            self.assertEqual(self.t.meeting_model(), (local, config))
+        self.cloud.transcribe.assert_not_called()
+
+    def test_meeting_uses_dictation_model_when_local(self):
+        self.t.model_config = ModelConfig('large-v3', 'cuda', 'int8_float16')
+        self.assertEqual(self.t.meeting_model(), (self.cloud, self.t.model_config))
+        self.assertIsNone(self.t._local)
+
+    def test_switch_to_cloud_without_credentials_keeps_current_model(self):
+        current, config = Mock(), ModelConfig('large-v3', 'cuda', 'int8_float16')
+        self.t.model, self.t.model_config = current, config
+        with patch.object(app, 'require_credentials', side_effect=CloudError('sem chave')):
+            with self.assertRaisesRegex(CloudError, 'sem chave'):
+                self.t.load_model({'whisper_model': XAI})
+        self.assertIs(self.t.model, current)
+        self.assertEqual(self.t.model_config, config)
+
+    def test_switch_to_cloud_frees_local_weights(self):
+        whisper = Mock()
+        self.t.model, self.t.model_config = whisper, ModelConfig('large-v3', 'cuda', 'int8_float16')
+        self.t._local = Mock()
+        with patch.object(app, 'require_credentials'), \
+             patch.object(app, 'CloudModel') as cloud:
+            self.t.load_model({'whisper_model': XAI, 'whisper_device': 'cpu'})
+        self.assertIs(self.t.model, cloud.return_value)
+        self.assertEqual(self.t.model_config.engine, 'cloud')
+        self.assertIsNone(self.t._local)
+        self.assertEqual(self.t._fallback_device, 'cpu')

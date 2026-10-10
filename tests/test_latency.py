@@ -1,5 +1,4 @@
 """Regressoes do caminho de ditado; nao abrem mic, colam no desktop nem usam a GPU."""
-import collections
 import json
 import os
 import queue
@@ -68,7 +67,7 @@ class LatencyTests(unittest.TestCase):
                                 transcribe=Mock(return_value=(generate(), None)))
         with patch.object(app, 'WhisperModel', return_value=model), patch.object(app, 'get_speech_timestamps') as vad, \
              patch.object(app, 'download_model', return_value='/cached/model'), \
-             patch.object(app, 'resolve_model_config', return_value=ModelConfig('base', 'cpu', 'int8')):
+             patch.object(app, 'resolve_model_config', return_value=ModelConfig('large-v3-turbo', 'cpu', 'int8')):
             t.load_model()
         self.assertEqual(decoded, [True])
         self.assertIs(t.model, model)
