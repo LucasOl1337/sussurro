@@ -4,6 +4,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Refazer** no histórico dispara na hora com o modelo e o idioma atuais do Sussurro, sem abrir diálogo. Pra tentar outro motor, troca no seletor e aplica.
+- A Biblioteca não quebra mais o Refazer quando o Whisper escreve termo hifenizado (`claude-code` → `Claude Code`). O erro `KeyError: 'claude code'` nas 11h04 vinha daí.
 - Ditar com a janela do Sussurro em foco volta a só salvar no histórico, sem colar, sem erro e sem Enter automático. A v0.7.0 marcava esses ditados como falha.
 - `sussurro transcribe` (áudio do WhatsApp pelo Hermes) não disputa mais o modelo com um ditado em andamento: responde ocupado em JSON e o Hermes pode tentar de novo.
 - Botão **Liberar espaço** no histórico: apaga o WAV de ditados com texto mais antigos que N dias, depois de mostrar quantos arquivos e quantos MiB. O texto fica; áudio sem texto nunca é apagado. Entradas sem áudio mostram "Sem áudio".

@@ -140,9 +140,8 @@ class HistoryCleanupTests(unittest.TestCase):
         self.assertEqual(app.HISTORY_INDEX.read_text(), self.index)
         app.App._play(ui, str(self.folder / 'old.wav'))
         self.assertIn('texto do histórico foi mantido', ui.status.configure.call_args.kwargs['text'])
-        with patch.object(app, 'RetranscribeDialog') as dialog:
-            app.App._retry_entry(ui, self.entries[0])
-        dialog.assert_not_called()
+        app.App._retry_entry(ui, self.entries[0])
+        self.assertIn('texto do histórico foi mantido', ui.status.configure.call_args.kwargs['text'])
         self.assertEqual(app.App._load_history()[-1]['text'], 'texto antigo')
 
     @unittest.skipUnless(os.environ.get('SUSSURRO_TEST_TK') == '1', 'Tk apenas na bancada isolada')

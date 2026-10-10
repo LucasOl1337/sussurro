@@ -78,7 +78,6 @@ import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from sussurro_compare_ui import ComparisonPanel
-from sussurro_history_ui import RetranscribeDialog
 if not IS_WIN:
     from sussurro_meeting_ui import MeetingPanel
 import sounddevice as sd
@@ -660,6 +659,15 @@ def _distancia(a: str, b: str) -> int:
     return prev[-1]
 
 
+def _library_words(s: str) -> list:
+    return [w for w in re.split(r"[\s-]+", s) if w]
+
+
+def _library_key(s: str) -> str:
+    """Normaliza variante da Biblioteca: minuscula, hifen vira espaco."""
+    return " ".join(_library_words(s.lower()))
+
+
 class Library:
     """Biblioteca de palavras: troca o que o whisper escreve errado pelo termo certo.
 
@@ -717,11 +725,17 @@ class Library:
             return
         pairs.sort(key=lambda p: len(p[0]), reverse=True)  # variante mais longa ganha
         mapping = {}
+        alts = []
         for wrong, certo in pairs:
-            mapping.setdefault(wrong.lower(), certo)
-        # separador [\s-]+: o whisper gosta de hifenizar o que ouviu junto ("9-router")
-        alt = "|".join(r"[\s-]+".join(re.escape(w) for w in wrong.split())
-                       for wrong, _c in pairs)
+            mapping.setdefault(_library_key(wrong), certo)
+            words = _library_words(wrong)
+            if words:
+                # separador [\s-]+: o whisper gosta de hifenizar o que ouviu junto ("9-router")
+                alts.append(r"[\s-]+".join(re.escape(w) for w in words))
+        if not alts:
+            self._rules = None
+            return
+        alt = "|".join(alts)
         # (?<!\w)/(?!\w) em vez de \b: funciona tambem com variante que comeca/termina
         # em pontuacao, e segue pegando so palavra inteira
         self._rules = (re.compile(rf"(?<!\w)(?:{alt})(?!\w)", re.IGNORECASE), mapping)
@@ -756,9 +770,11 @@ class Library:
 
         def _troca(m):
             nonlocal trocas
+            certo = mapping.get(_library_key(m.group(0)))
+            if certo is None:
+                return m.group(0)
             trocas += 1
-            # normaliza espaco E hifen pra achar a variante no mapa ("9-Router" -> "9 router")
-            return mapping[" ".join(m.group(0).lower().replace("-", " ").split())]
+            return certo
 
         text = pattern.sub(_troca, text)
         text, fuzzy_trocas = self._apply_fuzzy(text)
@@ -3493,15 +3509,11 @@ class App:
             return
         if entry.get("retrying"):
             return
-        dialog = getattr(self, "_retry_dialog", None)
-        if dialog is not None and dialog.winfo_exists():
-            dialog.lift()
+        try:
+            self.transcriber.retry_history_async(entry)
+        except Exception as error:
+            self.status.configure(text=str(error))
             return
-        self._retry_dialog = RetranscribeDialog(
-            self, entry, lambda selection, language: self._start_history_retry(entry, selection, language))
-
-    def _start_history_retry(self, entry, selection, language):
-        self.transcriber.retry_history_async(entry, selection, language)
         entry["retrying"] = True
         self.record_btn.configure(state="disabled")
         self.apply_model_btn.configure(state="disabled")

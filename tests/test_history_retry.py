@@ -202,6 +202,61 @@ class HistoryRetryTests(unittest.TestCase):
         self.assertFalse(self.t.busy())
 
 
+class LibraryHyphenTests(unittest.TestCase):
+    def test_hyphenated_variant_replaces_without_keyerror(self):
+        lib = app.Library.__new__(app.Library)
+        lib.entries = [{'certo': 'Claude Code', 'erros': ['claude-code', 'cloud code']}]
+        lib._compile()
+        for source in ('usa claude-code hoje', 'usa claude code hoje', 'usa Claude-Code hoje'):
+            with self.subTest(source=source):
+                text, fixes = lib.apply(source)
+                self.assertEqual(text, 'usa Claude Code hoje')
+                self.assertEqual(fixes, 1)
+
+
+class HistoryRetryUiTests(unittest.TestCase):
+    def test_retry_entry_starts_with_current_model_and_no_dialog(self):
+        entry = {'wav': 'saved.wav', 'text': 'texto anterior'}
+        ui = SimpleNamespace(
+            transcriber=Mock(),
+            status=Mock(),
+            record_btn=Mock(),
+            apply_model_btn=Mock(),
+            _render_history=Mock(),
+            entries=[entry],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / 'saved.wav').write_bytes(b'WAV')
+            with patch.object(app, 'HISTORY_DIR', folder):
+                app.App._retry_entry(ui, entry)
+        ui.transcriber.retry_history_async.assert_called_once_with(entry)
+        self.assertTrue(entry['retrying'])
+        ui.record_btn.configure.assert_called_once_with(state='disabled')
+        ui.apply_model_btn.configure.assert_called_once_with(state='disabled')
+        ui._render_history.assert_called_once()
+        ui.status.configure.assert_not_called()
+
+    def test_retry_entry_reports_busy_without_marking_retrying(self):
+        entry = {'wav': 'saved.wav', 'text': 'texto anterior'}
+        ui = SimpleNamespace(
+            transcriber=Mock(),
+            status=Mock(),
+            record_btn=Mock(),
+            apply_model_btn=Mock(),
+            _render_history=Mock(),
+        )
+        ui.transcriber.retry_history_async.side_effect = RuntimeError('Aguarde o trabalho atual terminar.')
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / 'saved.wav').write_bytes(b'WAV')
+            with patch.object(app, 'HISTORY_DIR', folder):
+                app.App._retry_entry(ui, entry)
+        self.assertNotIn('retrying', entry)
+        ui.status.configure.assert_called_once_with(text='Aguarde o trabalho atual terminar.')
+        ui.record_btn.configure.assert_not_called()
+
+
 class HistoryActionsTests(unittest.TestCase):
     def test_completed_entry_has_independent_retry_copy_and_play_actions(self):
         entry = {'wav': 'saved.wav', 'text': 'texto pronto'}
