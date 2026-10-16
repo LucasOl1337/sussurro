@@ -153,7 +153,6 @@ class HistoryCleanupTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.object(app, 'load_settings', return_value=dict(app.DEFAULT_SETTINGS)))
             stack.enter_context(patch.object(app, 'list_input_devices', return_value={}))
-            stack.enter_context(patch.object(app, 'list_loopback_devices', return_value={}))
             stack.enter_context(patch.object(app, 'detect_hardware', return_value=HardwareInfo()))
             stack.enter_context(patch.object(app.App, '_begin_model_load'))
             stack.enter_context(patch.object(app.App, '_build_devices_tab', side_effect=lambda: app.ctk.CTkFrame(root)))

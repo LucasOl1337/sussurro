@@ -158,13 +158,46 @@ class ModelReplacementTests(unittest.TestCase):
 
     def test_ui_refuses_switch_during_recording(self):
         self.t.recording.set()
-        ui = SimpleNamespace(transcriber=self.t, status=Mock(), _begin_model_load=Mock())
+        ui = SimpleNamespace(transcriber=self.t, status=Mock(), _begin_model_load=Mock(),
+                             _show_model_selection=Mock())
         app.App._apply_model(ui)
         ui._begin_model_load.assert_not_called()
+        ui._show_model_selection.assert_called_once()  # combo volta pro modelo ativo
+
+    def test_picking_a_model_loads_it_without_extra_click(self):
+        ui = SimpleNamespace(transcriber=self.t, status=Mock(), _begin_model_load=Mock(),
+                             settings={'whisper_model': 'large-v3', 'whisper_device': 'cuda'},
+                             model_choice=Mock(get=Mock(return_value=app.MODEL_LABELS[XAI])),
+                             device_choice=Mock(get=Mock(return_value='GPU NVIDIA')),
+                             device_labels={'auto': 'Automatico', 'cuda': 'GPU NVIDIA', 'cpu': 'CPU'})
+        app.App._apply_model(ui)
+        ui._begin_model_load.assert_called_once_with(
+            {'whisper_model': XAI, 'whisper_device': 'cuda'}, persist=True)
+        ui._begin_model_load.reset_mock()
+        ui.model_choice.get.return_value = app.MODEL_LABELS['large-v3']
+        app.App._apply_model(ui)
+        ui._begin_model_load.assert_not_called()  # mesma escolha ja carregada
+
+    def test_engine_status_says_what_transcribes_next(self):
+        self.assertEqual(self.t.engine_status(), ('Large-v3 · CPU', 'ok'))
+        self.t.model_config = app.resolve_model_config({'whisper_model': XAI})
+        self.t.model = SimpleNamespace(last_provider=None)
+        self.assertEqual(self.t.engine_status(), ('Grok (xAI) · nuvem', 'ok'))
+        self.t.model.last_provider = ELEVENLABS
+        text, level = self.t.engine_status()
+        self.assertEqual(level, 'aviso')
+        self.assertTrue(text.startswith('ElevenLabs Scribe · nuvem'))
+        self.t._cloud_down_until = app.time.monotonic() + 30
+        text, level = self.t.engine_status()
+        self.assertEqual(level, 'aviso')
+        self.assertIn('Turbo', text)
+        self.assertIn('Grok (xAI) fora', text)
+        self.t.model_loading.set()
+        self.assertEqual(self.t.engine_status()[1], 'aviso')
 
     def test_ui_only_saves_successful_selection(self):
         ui = SimpleNamespace(transcriber=self.t, settings={'language': 'pt'}, _save=Mock(),
-                             model_label=Mock(), record_btn=Mock(), apply_model_btn=Mock(),
+                             model_label=Mock(), record_btn=Mock(), _set_model_picker=Mock(), _show_model_selection=Mock(),
                              model_choice=Mock(), device_choice=Mock(), status_queue=queue.Queue())
         selection = {'whisper_model': ELEVENLABS, 'whisper_device': 'cpu'}
         app.App._model_load_done(ui, selection, True, 'failure')
@@ -263,6 +296,15 @@ class CloudTranscriberTests(unittest.TestCase):
         whisper.assert_called_once()                            # Turbo carregado uma vez so
         self.assertEqual(local.transcribe.call_count, 2)
         self.assertIn('Turbo local', self.t.status_queue.get_nowait())
+        self.assertEqual(self.t.last_engine, 'Turbo · GPU NVIDIA (nuvem caiu)')
+
+    def test_cloud_answer_names_the_provider_that_actually_answered(self):
+        self.cloud.transcribe.return_value = ([self.segment], None)
+        self.t._transcribe_locked(self.audio, language='pt', vad_filter=False)
+        self.assertEqual(self.t.last_engine, 'ElevenLabs Scribe · nuvem')
+        self.t.model_config = ModelConfig(XAI, 'cloud', 'api')  # Grok falhou, ElevenLabs respondeu
+        self.t._transcribe_locked(self.audio, language='pt', vad_filter=False)
+        self.assertEqual(self.t.last_engine, 'ElevenLabs Scribe · nuvem (reserva: Grok (xAI) falhou)')
 
     def test_cloud_is_retried_after_cooldown_and_announces_recovery(self):
         self.t._cloud_down_until = time.monotonic() - 1

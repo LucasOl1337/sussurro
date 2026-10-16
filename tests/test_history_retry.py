@@ -198,7 +198,7 @@ class HistoryRetryTests(unittest.TestCase):
              patch.object(app, 'drop_hallucinations', side_effect=lambda segments, audio: segments):
             self.t._retry_history_worker(self.entry, self.path, {'whisper_model': 'large-v3'})
         self.assertEqual(self.rows()[0]['text'], self.entry['text'])
-        self.assertIn('Aplicar modelo', self.rows()[0]['retry_error'])
+        self.assertIn('Escolha o modelo de novo', self.rows()[0]['retry_error'])
         self.assertIsNone(self.t.model)
         self.assertIsNone(self.t.model_config)
         self.assertFalse(self.t.busy())
@@ -223,7 +223,7 @@ class HistoryRetryUiTests(unittest.TestCase):
             transcriber=Mock(),
             status=Mock(),
             record_btn=Mock(),
-            apply_model_btn=Mock(),
+            _set_model_picker=Mock(),
             _render_history=Mock(),
             entries=[entry],
         )
@@ -235,7 +235,7 @@ class HistoryRetryUiTests(unittest.TestCase):
         ui.transcriber.retry_history_async.assert_called_once_with(entry)
         self.assertTrue(entry['retrying'])
         ui.record_btn.configure.assert_called_once_with(state='disabled')
-        ui.apply_model_btn.configure.assert_called_once_with(state='disabled')
+        ui._set_model_picker.assert_called_once_with('disabled')
         ui._render_history.assert_called_once()
         ui.status.configure.assert_not_called()
 
@@ -245,7 +245,7 @@ class HistoryRetryUiTests(unittest.TestCase):
             transcriber=Mock(),
             status=Mock(),
             record_btn=Mock(),
-            apply_model_btn=Mock(),
+            _set_model_picker=Mock(),
             _render_history=Mock(),
         )
         ui.transcriber.retry_history_async.side_effect = RuntimeError('Aguarde o trabalho atual terminar.')

@@ -34,6 +34,15 @@ class ModelConfig:
         return engine_of(self.model)
 
 
+def engine_label(model, device=None):
+    """Nome curto do que transcreve: 'Grok (xAI) · nuvem', 'Large-v3 · GPU NVIDIA'."""
+    if is_cloud(model):
+        return f"{PROVIDER_NAMES[model]} · nuvem"
+    name = MODEL_LABELS.get(model, model).split(" · ")[0]
+    where = {"cuda": "GPU NVIDIA", "cpu": "CPU"}.get(device, "local")
+    return f"{name} · {where}"
+
+
 def engine_of(model):
     """Nuvem vai por HTTP (sussurro_cloud); o resto e faster-whisper/CTranslate2."""
     return "cloud" if is_cloud(model) else "whisper"

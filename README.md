@@ -112,7 +112,7 @@ No Linux, fechar a janela só esconde a interface: o motor e os atalhos seguem r
 
 ## Escolha do modelo
 
-No card de configuração, escolha **MODELO** e **EXECUTAR EM** e clique em **Aplicar modelo**. A troca acontece sem reiniciar e só é aceita fora de um ditado ou transcrição em andamento. O cabeçalho e `python app.py status` mostram o modelo e dispositivo ativos. A preferência só é salva depois que o modelo carrega; se a troca falhar, o app tenta recuperar o anterior pelo cache.
+No card de configuração, escolher em **MODELO** ou **EXECUTAR EM** já troca o modelo, sem reiniciar; a troca só é aceita fora de um ditado ou transcrição em andamento (recusada, o combo volta pro modelo ativo). **EM USO AGORA** mostra o que transcreve o próximo trecho: verde quando é o escolhido, laranja quando a nuvem caiu e o Turbo local assumiu ou quando o outro provedor de nuvem respondeu, vermelho sem modelo (VRAM cheia, por exemplo). O status de cada trecho diz com qual motor saiu e o histórico guarda isso no campo `engine`. `python app.py status` mostra o modelo e dispositivo ativos. A preferência só é salva depois que o modelo carrega; se a troca falhar, o app tenta recuperar o anterior pelo cache.
 
 | Modelo | Onde roda | Quando usar |
 | --- | --- | --- |
@@ -162,9 +162,9 @@ Quem usava Automático, Tiny, Base, Small, Medium ou Parakeet passa para o **Tur
 
 - **Atalho global de mouse** — o botão configurado (padrão: lateral 2 / "frente") liga e desliga a gravação em qualquer aplicativo. No Windows o clique é suprimido, então não vira "voltar/avançar" no browser. No Linux o clique também chega ao aplicativo debaixo (pynput não suprime o evento). Em `Setar` você clica o botão desejado (meio, lateral 1 ou lateral 2) para redefinir.
 - **Ação** — `alternar` (clique liga/desliga) ou `segurar` (push-to-talk).
-- **Microfone** — seletor com nomes legíveis e uma explicação da entrada selecionada. `… — padrão do sistema (PipeWire)` acompanha automaticamente o microfone escolhido no sistema; `USB direto` abre aquele aparelho sem acompanhar trocas; PulseAudio, ALSA e JACK aparecem identificados como rotas de compatibilidade ou de áudio profissional. O identificador técnico continua salvo internamente para não quebrar preferências antigas.
+- **Microfone** — no Linux com PipeWire, só **Padrão do PC** (segue o microfone padrão do sistema) e os microfones físicos conectados, pelo nome do aparelho (`MCHOSE X9`, `FIFINE Microphone`). Os plugins do ALSA (`lavrate`, `speex`, `upmix`...), monitores e sinks virtuais não aparecem. Um microfone específico grava pela rota `pulse` com `PULSE_SOURCE`, então funciona mesmo com o PipeWire segurando o aparelho. Sem PipeWire (ou no Windows) a lista volta a ser a do PortAudio.
 - **Fonte** — `microfone` (entrada), `audio do PC` (o que está saindo nas caixas/fones: loopback WASAPI no Windows, monitor Pulse/PipeWire no Linux) ou `os dois` (mistura mic + PC antes do VAD/whisper).
-- **Canal do PC** — qual saída/monitor capturar no modo `audio do PC` / `os dois`. `padrao do sistema` usa o dispositivo de reprodução atual. O combo fica desabilitado quando a fonte é só microfone.
+- O áudio do PC (`audio do PC` / `os dois`) é sempre a saída padrão do sistema.
 - **Transcrição** — `simultaneo`: trechos vão aparecendo conforme você pausa entre frases (corte por VAD após ~0,7 s de silêncio); `final`: acumula tudo e transcreve de uma vez ao parar.
 - **Formatação** — depois do whisper, o texto ganha ponto em cláusula nova e quebra de parágrafo em pausa longa (~1,5 s, não na respiração de 0,7 s) e uma linha nova antes de âncoras faladas (`Pergunta 7`, `Questão 12`, `Primeiro`/`Segundo`/`Terceiro`). Não reescreve nem tira “né/sabe”. Vale no colar, no histórico e no copiar. Ditados antigos ficam como estão.
 - **Envio** — `colar`: no Linux, foca a janela (e o campo web) sob o mouse e cola via Ctrl+V. No Windows cola via Ctrl+V no campo onde o cursor estiver. No Windows o clipboard original é preservado em todos os formatos; no Linux o backup é só texto (`wl-copy`/`xclip`/`xsel`). `digitar`: simula teclado.

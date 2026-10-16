@@ -24,7 +24,7 @@ class CaptureWatchdogTests(unittest.TestCase):
         self.callbacks = []
 
     def start(self, mode='os_dois'):
-        def open_fake(_device, _loopback, label):
+        def open_fake(_device, _loopback, label, source=None):
             self.t._resamplers.append(None)
             self.callbacks.append(self.t._make_callback(label, self.t._slot))
         with patch.object(self.t, '_open_stream', side_effect=open_fake):

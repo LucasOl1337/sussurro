@@ -83,12 +83,12 @@ if not IS_WIN:
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from faster_whisper.utils import download_model
-from sussurro_audio import prepare_input_devices
+from sussurro_audio import pipewire_inputs, prepare_input_devices
 from sussurro_hardware import (detect_hardware, execution_device_labels,
                                execution_hardware_note)
-from sussurro_models import (MODEL_LABELS, DEFAULT_MODEL_SETTINGS, fallback_config,
+from sussurro_models import (LOCAL_DEFAULT, MODEL_LABELS, DEFAULT_MODEL_SETTINGS, engine_label, fallback_config,
                              normalize_model_settings, resolve_model_config, model_path)
-from sussurro_cloud import CloudError, CloudModel, require_credentials
+from sussurro_cloud import PROVIDER_NAMES, CloudError, CloudModel, require_credentials
 import sussurro_sounds
 from sussurro_meeting import drop_hallucinations
 from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -139,6 +139,7 @@ ACCENT = "#f0500a"         # nunca carrega texto claro (grafite por cima: 4,96:1
 ACCENT_HOVER = "#d64708"
 ACCENT_TEXT = "#f07944"    # laranja-como-texto no escuro
 GRAPHITE = "#16181a"       # tinta sobre o laranja
+ENGINE_COLORS = {"ok": "#7fd18b", "aviso": ACCENT_TEXT, "off": "#f08080"}  # EM USO AGORA
 
 
 def pick_font(candidates, fallback):
@@ -253,34 +254,24 @@ def list_input_devices() -> dict:
     ]
     system_microphone = ""
     if not IS_WIN:
+        found = pipewire_inputs(devices, _pipewire_sources(), devmod.default_source())
+        if found:
+            return found
         system_microphone = devmod.pretty_source(devmod.default_source())
         if system_microphone == "—":
             system_microphone = ""
     return prepare_input_devices(devices, system_microphone)
 
 
-def list_loopback_devices() -> dict:
-    """Nome -> indice das fontes de audio do PC (saida WASAPI ou monitor Pulse/PipeWire)."""
-    host = _hostapi_index()
-    if IS_WIN:
-        return {
-            d["name"]: d["index"]
-            for d in sd.query_devices()
-            if d["max_output_channels"] > 0 and d["hostapi"] == host
-        }
-    found = {
-        d["name"]: d["index"]
-        for d in sd.query_devices()
-        if d["max_input_channels"] > 0 and d["hostapi"] == host
-        and re.search(r"monitor|loopback", d["name"], re.I)
-    }
-    if found:
-        return found
-    return {
-        d["name"]: d["index"]
-        for d in sd.query_devices()
-        if d["max_output_channels"] > 0 and d["hostapi"] == host
-    }
+def _pipewire_sources() -> list:
+    """`pactl -f json list sources`; lista vazia se o pactl faltar ou nao souber JSON."""
+    try:
+        r = subprocess.run(["pactl", "-f", "json", "list", "sources"], capture_output=True,
+                           text=True, timeout=3)
+        sources = json.loads(r.stdout) if r.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    return sources if isinstance(sources, list) else []
 
 
 # -- clipboard, cursor, area util --------------------------------------------
@@ -982,6 +973,7 @@ class Transcriber:
         self._segment_queue: queue.Queue = queue.Queue()
         self._delivery_queue: queue.Queue = queue.Queue()
         self._session_parts: list = []
+        self.last_engine = None       # quem transcreveu o ultimo trecho (engine_label)
         self._session_audio: list = []
         self._session_errors: list[str] = []
         self._session_started = None
@@ -1038,6 +1030,28 @@ class Transcriber:
                 self._cloud_down_until = 0.0
         finally:
             self.model_loading.clear()
+
+    def engine_status(self) -> tuple[str, str]:
+        """O que transcreve o proximo trecho e se e o escolhido: ("texto", ok|aviso|off).
+        So le atributos: o poll da UI chama sem tomar o _model_lock."""
+        if self.model_loading.is_set():
+            return "carregando o modelo...", "aviso"
+        config, model = self.model_config, self.model
+        if model is None or config is None:
+            return "nenhum modelo carregado", "off"
+        if config.engine != "cloud":
+            return engine_label(config.model, config.device), "ok"
+        chosen = PROVIDER_NAMES[config.model]
+        left = self._cloud_down_until - time.monotonic()
+        if left > 0:
+            local = self._local_config
+            turbo = (engine_label(local.model, local.device) if local
+                     else engine_label(LOCAL_DEFAULT, self._fallback_device))
+            return f"{turbo} — {chosen} fora, tenta de novo em {math.ceil(left)} s", "aviso"
+        used = getattr(model, "last_provider", None)
+        if used and used != config.model:
+            return f"{PROVIDER_NAMES[used]} · nuvem — {chosen} falhou no último trecho", "aviso"
+        return engine_label(config.model), "ok"
 
     def _is_cloud_locked(self):
         return self.model_config is not None and self.model_config.engine == "cloud"
@@ -1254,8 +1268,10 @@ class Transcriber:
         except Exception as e:
             self.status_queue.put(f"ERRO ({label}): {e}")
 
-    def _open_stream(self, device_index: int | None, loopback: bool, label: str):
-        """Abre mic (sounddevice) ou audio do PC (soundcard loopback)."""
+    def _open_stream(self, device_index: int | None, loopback: bool, label: str,
+                     source: str | None = None):
+        """Abre mic (sounddevice) ou audio do PC (soundcard loopback). `source` grava uma
+        fonte PipeWire especifica pela rota "pulse": o libpulse le PULSE_SOURCE ao abrir."""
         if loopback:
             class _LoopbackHandle:
                 def __init__(self):
@@ -1281,7 +1297,10 @@ class Transcriber:
         for rate in rates:
             stream = None
             self._resamplers.append(StreamResampler(rate) if rate != SAMPLE_RATE else None)
+            previous_source = os.environ.get("PULSE_SOURCE")
             try:
+                if source:
+                    os.environ["PULSE_SOURCE"] = source
                 stream = sd.InputStream(
                     samplerate=rate, channels=1, dtype="float32",
                     blocksize=round(rate * BLOCK_SIZE / SAMPLE_RATE), device=device_index,
@@ -1298,10 +1317,16 @@ class Transcriber:
             else:
                 self._streams.append(stream)
                 return
+            finally:
+                if source:
+                    if previous_source is None:
+                        os.environ.pop("PULSE_SOURCE", None)
+                    else:
+                        os.environ["PULSE_SOURCE"] = previous_source
 
     def start(self, device_index: int | None, inject: bool,
               capture_mode: str = "microfone", loopback_index: int | None = None,
-              auto_enter: bool = False):
+              auto_enter: bool = False, mic_source: str | None = None):
         if self.comparing.is_set():
             raise RuntimeError("Comparacao de modelos em andamento.")
         if self.model_loading.is_set():
@@ -1345,7 +1370,7 @@ class Transcriber:
         self._slot = 0
         try:
             if capture_mode != "audio_pc":
-                self._open_stream(device_index, False, "mic")
+                self._open_stream(device_index, False, "mic", source=mic_source)
                 self._slot += 1
             if capture_mode != "microfone":
                 self._open_stream(loopback_index, True, "audio do PC")
@@ -1557,8 +1582,10 @@ class Transcriber:
                     continue
                 t0 = time.perf_counter()
                 lang = None if self.language == "auto" else self.language
+                self.last_engine = None
                 segments, _info = self._transcribe_locked(
                     audio, language=lang, vad_filter=(mode == "final"))
+                engine = self.last_engine
                 text = format_transcript(segments)
                 text, fixes = self.library.apply(text)  # troca da Biblioteca antes de sair daqui
                 if sid != self._session_id:
@@ -1566,7 +1593,7 @@ class Transcriber:
                 dt = time.perf_counter() - t0
                 payload = ""
                 para = self._session_emitted and lead_s >= PARAGRAPH_SILENCE_S
-                self._session_parts.append((audio, text, fixes, para))
+                self._session_parts.append((audio, text, fixes, para, engine))
                 if text:
                     if self._session_emitted:
                         payload = ("\n\n" if para else " ") + text
@@ -1575,7 +1602,7 @@ class Transcriber:
                     self.text_queue.put(payload)
                     self._session_emitted = True
                 self._delivery_queue.put((audio.size / SAMPLE_RATE, payload, self.inject_method,
-                                          sid, t0 + dt, dt, bool(text and inject)))
+                                          sid, t0 + dt, dt, bool(text and inject), engine))
                 deve_baixar = False  # a entrega agora e responsavel por dar baixa
             except Exception as e:  # falha alto: reporta no status e mantem a thread viva
                 traceback.print_exc()
@@ -1589,7 +1616,8 @@ class Transcriber:
     def _delivery_loop(self):
         """Uma fila por sessao: paste/type, Enter e historico nunca ultrapassam um trecho."""
         while True:
-            audio_s, payload, method, sid, ready_at, dt, inject = self._delivery_queue.get()
+            audio_s, payload, method, sid, ready_at, dt, inject, *extra = self._delivery_queue.get()
+            engine = extra[0] if extra else None
             try:
                 if sid != self._session_id:
                     continue
@@ -1619,7 +1647,8 @@ class Transcriber:
                                            if self._stop_requested_at is not None else None),
                       injected=inject)
                 state = "Gravando — pode falar." if self.recording.is_set() else "Parado."
-                self.status_queue.put(f"{state}  (trecho de {audio_s:.1f}s em {dt:.1f}s)")
+                via = f" com {engine}" if engine else ""
+                self.status_queue.put(f"{state}  (trecho de {audio_s:.1f}s em {dt:.1f}s{via})")
             except OwnWindowTarget as e:
                 if sid == self._session_id:
                     self._session_auto_enter = False  # Enter na janela do Sussurro apertaria botao
@@ -1660,7 +1689,10 @@ class Transcriber:
                             audio, language=language, beam_size=5, vad_filter=vad_filter,
                             hotwords=self.library.hotwords,
                         )
-                        return drop_hallucinations(list(segments), audio), info
+                        result = drop_hallucinations(list(segments), audio), info
+                        config = self.model_config
+                        self.last_engine = engine_label(config.model, config.device) if config else None
+                        return result
                     except RuntimeError as error:
                         message = str(error).lower()
                         cuda = ("cuda" in message or
@@ -1692,7 +1724,7 @@ class Transcriber:
                         self._load_model_config(previous, self._weights(previous, local_only=True))
                     except Exception as error:
                         raise RuntimeError("Nao foi possivel restaurar o modelo do ditado. "
-                                           "Clique em Aplicar modelo para carrega-lo novamente.") from error
+                                           "Escolha o modelo de novo para carrega-lo.") from error
 
     def _transcribe_cloud_locked(self, audio, language, vad_filter):
         """Nuvem primeiro; se os dois provedores falharem, o mesmo trecho sai no Turbo local
@@ -1706,6 +1738,12 @@ class Transcriber:
                     self.status_queue.put(f"{self.model_config.label} voltou.")
                 _perf("cloud_segment", provider=self.model.last_provider,
                       audio_s=round(audio.size / SAMPLE_RATE, 3))
+                used = getattr(self.model, "last_provider", None)
+                if used not in PROVIDER_NAMES:
+                    used = self.model_config.model
+                self.last_engine = engine_label(used)
+                if used != self.model_config.model:
+                    self.last_engine += f" (reserva: {PROVIDER_NAMES[self.model_config.model]} falhou)"
                 return drop_hallucinations(list(segments), audio), info
             except CloudError as error:
                 self._cloud_down_until = time.monotonic() + CLOUD_RETRY_S
@@ -1715,7 +1753,9 @@ class Transcriber:
         try:
             segments, info = local.transcribe(audio, language=language, beam_size=5, vad_filter=vad_filter,
                                               hotwords=self.library.hotwords)
-            return drop_hallucinations(list(segments), audio), info
+            result = drop_hallucinations(list(segments), audio), info
+            self.last_engine = engine_label(self._local_config.model, self._local_config.device) + " (nuvem caiu)"
+            return result
         finally:
             self._local_used = time.monotonic()
 
@@ -1761,7 +1801,7 @@ class Transcriber:
             if not text:
                 _level, diagnosis = self._audio_diagnosis(audio)
                 raise ValueError(diagnosis)
-            entry = self._archive_audio(audio, text, fixes, datetime.now())
+            entry = self._archive_audio(audio, text, fixes, datetime.now(), engine=self.last_engine)
             _perf("file_done", source=src.name, audio_s=round(audio.size / SAMPLE_RATE, 3),
                   inference_ms=round((time.perf_counter() - t0) * 1000, 1))
             self.status_queue.put(f"Arquivo transcrito ({audio.size / SAMPLE_RATE:.1f}s).")
@@ -1772,7 +1812,8 @@ class Transcriber:
 
 
     def _archive_audio(self, audio, text: str, fixes: int, started: datetime, *,
-                       failed: bool = False, error: str | None = None, sid=None) -> dict | None:
+                       failed: bool = False, error: str | None = None, sid=None,
+                       engine: str | None = None) -> dict | None:
         """Grava o WAV e seu registro, inclusive quando a transcricao falhou."""
         if failed:
             level, diagnosis = self._audio_diagnosis(audio)
@@ -1801,6 +1842,8 @@ class Transcriber:
                 # dur e fix alimentam a aba ESTATISTICAS; entrada antiga usa wav / zero
                 entry = {"ts": started.isoformat(timespec="seconds"), "wav": wav_name,
                          "text": text, "dur": round(audio.size / SAMPLE_RATE, 2), "fix": fixes}
+                if engine:
+                    entry["engine"] = engine
                 if failed:
                     entry["failed"] = True
                     entry["error"] = error
@@ -1832,7 +1875,9 @@ class Transcriber:
         fixes = sum(f for _a, _t, f, *_ in parts)
         failed = bool(errors) or not text
         error = errors[-1] if errors else ("Nenhuma fala reconhecida." if not text else None)
-        self._archive_audio(audio, text, fixes, started, failed=failed, error=error, sid=sid)
+        engines = list(dict.fromkeys(p[4] for p in parts if len(p) > 4 and p[4]))
+        self._archive_audio(audio, text, fixes, started, failed=failed, error=error, sid=sid,
+                            engine=" + ".join(engines) or None)
 
     def _replace_history_entry(self, entry: dict) -> None:
         """Atualiza uma linha pelo nome do WAV sem arriscar truncar o historico."""
@@ -1952,6 +1997,8 @@ class Transcriber:
             if config is not None:
                 updated["model"] = config.model
                 updated["device"] = config.device
+            if self.last_engine:
+                updated["engine"] = self.last_engine
             updated.pop("failed", None)
             updated.pop("error", None)
             updated.pop("retrying", None)
@@ -3242,7 +3289,6 @@ class App:
 
         self.settings = load_settings()
         self.devices = list_input_devices()
-        self.loopback_devices = list_loopback_devices()
         self.hardware = detect_hardware()
         self.device_labels = execution_device_labels(self.hardware)
 
@@ -3362,35 +3408,36 @@ class App:
         self.lang = combo(["pt", "en", "auto"], self.settings["language"],
                           self._on_lang, 3, 2)
 
-        # 3a linha: fonte de captura (mic / audio do PC / os dois) + canal do PC
+        # 3a linha: fonte de captura (mic / audio do PC / os dois); o audio do PC e
+        # sempre a saida padrao do sistema
         cfg_label("FONTE", 4, 0)
-        cfg_label("CANAL DO PC", 4, 1)
         self.fonte = combo(["microfone", "audio do PC", "os dois"],
                            CAPTURE_LABELS[self.settings["capture_mode"]],
                            self._on_fonte, 5, 0)
-        pc_names = ["padrao do sistema"] + list(self.loopback_devices)
-        saved_pc = self.settings["loopback_device_name"]
-        if saved_pc not in self.loopback_devices:
-            saved_pc = None
-        self.pc_channel = combo(pc_names, "padrao do sistema" if saved_pc is None else saved_pc,
-                                self._on_pc_channel, 5, 1)
-        self.pc_channel.configure(
-            state="disabled" if self.settings["capture_mode"] == "microfone" else "readonly")
-        cfg_label("O QUE ESTA ENTRADA FAZ", 4, 2)
+        cfg_label("O QUE ESTA ENTRADA FAZ", 4, 1)
         self.mic_help = ctk.CTkLabel(
             card, text="", text_color=INK_3, font=(self.FONT_UI, 11),
-            anchor="nw", justify="left", wraplength=340)
-        self.mic_help.grid(row=5, column=2, sticky="new", padx=CPAD, pady=(8, 0))
+            anchor="nw", justify="left", wraplength=700)
+        self.mic_help.grid(row=5, column=1, columnspan=2, sticky="new", padx=CPAD, pady=(8, 0))
         self._update_mic_help()
 
+        # escolher ja troca o modelo; EM USO AGORA diz o que de fato transcreve o proximo
+        # trecho (inclusive quando a nuvem caiu e o Turbo local assumiu)
         cfg_label("MODELO", 6, 0)
         cfg_label("EXECUTAR EM", 6, 1)
+        cfg_label("EM USO AGORA", 6, 2)
         self.model_choice = combo(list(MODEL_LABELS.values()),
-                                  MODEL_LABELS[self.settings["whisper_model"]], lambda _: None, 7, 0)
+                                  MODEL_LABELS[self.settings["whisper_model"]],
+                                  lambda _: self._apply_model(), 7, 0)
         self.device_choice = combo(list(self.device_labels.values()),
-                                   self.device_labels[self.settings["whisper_device"]], lambda _: None, 7, 1)
-        self.apply_model_btn = self._secondary(card, "Aplicar modelo", self._apply_model)
-        self.apply_model_btn.grid(row=7, column=2, sticky="ew", padx=CPAD, pady=(6, 0))
+                                   self.device_labels[self.settings["whisper_device"]],
+                                   lambda _: self._apply_model(), 7, 1)
+        self.engine_now = ctk.CTkLabel(card, text="● carregando o modelo...", height=32,
+                                       text_color=ENGINE_COLORS["aviso"], anchor="w",
+                                       justify="left", wraplength=340,
+                                       font=(self.FONT_UI, 12, "bold"))
+        self.engine_now.grid(row=7, column=2, sticky="ew", padx=CPAD, pady=(6, 0))
+        self._engine_shown = None
         self.sounds_var = tk.BooleanVar(value=bool(self.settings["feedback_sounds"]))
         ctk.CTkSwitch(card, text="Sons de inicio, fim e erro", variable=self.sounds_var,
                       command=self._on_sounds, text_color=INK_2,
@@ -3611,7 +3658,7 @@ class App:
             return
         entry["retrying"] = True
         self.record_btn.configure(state="disabled")
-        self.apply_model_btn.configure(state="disabled")
+        self._set_model_picker("disabled")
         self._render_history()
 
     def _play(self, path: str):
@@ -4061,13 +4108,6 @@ class App:
     def _on_fonte(self, _e):
         mode = CAPTURE_VALUES[self.fonte.get()]
         self.settings["capture_mode"] = mode
-        self.pc_channel.configure(
-            state="disabled" if mode == "microfone" else "readonly")
-        self._save()
-
-    def _on_pc_channel(self, _e):
-        name = self.pc_channel.get()
-        self.settings["loopback_device_name"] = None if name == "padrao do sistema" else name
         self._save()
 
     def _on_mode(self, _e):
@@ -4094,11 +4134,9 @@ class App:
         device = self.mic_by_label.get(self.mic.get())
         return device.index if device else None
 
-    def _pc_device_index(self):
-        name = self.settings["loopback_device_name"]
-        if name not in self.loopback_devices:
-            return None  # None + loopback = saida padrao do sistema
-        return self.loopback_devices[name]
+    def _device_source(self):
+        device = self.mic_by_label.get(self.mic.get())
+        return device.source if device else None
 
     def _start(self, inject: bool, auto_enter: bool = False):
         if self.transcriber.recording.is_set():
@@ -4120,8 +4158,9 @@ class App:
             self.transcriber.start(
                 self._device_index(), inject,
                 capture_mode=self.settings["capture_mode"],
-                loopback_index=self._pc_device_index(),
+                loopback_index=None,  # audio do PC = saida padrao do sistema
                 auto_enter=auto_enter,
+                mic_source=self._device_source(),
             )
         except Exception as e:
             fonte = self.settings["capture_mode"]
@@ -4176,14 +4215,42 @@ class App:
         self._ui_queue.put((fn, args, kwargs))
 
     def _apply_model(self):
+        """Escolher no MODELO ou no EXECUTAR EM ja troca; recusado, o combo volta pro ativo."""
         if self.transcriber.busy():
             self.status.configure(text="Aguarde o ditado ou arquivo atual terminar antes de trocar o modelo.")
+            self._show_model_selection()
             return
         selection = {
             "whisper_model": next(k for k, v in MODEL_LABELS.items() if v == self.model_choice.get()),
             "whisper_device": next(k for k, v in self.device_labels.items() if v == self.device_choice.get()),
         }
+        current = normalize_model_settings(self.settings)
+        if selection == current and self.transcriber.model is not None:
+            return  # mesma escolha ja carregada
         self._begin_model_load(selection, persist=True)
+
+    def _show_model_selection(self):
+        """Combos mostram a escolha salva, que e a carregada (ou a que falhou e foi revertida)."""
+        current = normalize_model_settings(self.settings)
+        self.model_choice.set(MODEL_LABELS[current["whisper_model"]])
+        self.device_choice.set(self.device_labels[current["whisper_device"]])
+
+    def _set_model_picker(self, state):
+        """Trava os combos de modelo durante ditado, comparacao, Refazer ou carga."""
+        state = "readonly" if state == "normal" else state
+        self.model_choice.configure(state=state)
+        self.device_choice.configure(state=state)
+
+    def _update_engine_now(self):
+        if getattr(self, "engine_now", None) is None:
+            return  # card de config ainda nao montado
+        text, level = self.transcriber.engine_status()
+        if (text, level) == self._engine_shown:
+            return
+        self._engine_shown = (text, level)
+        mark = {"ok": "●", "aviso": "◐", "off": "○"}[level]
+        self.engine_now.configure(text=f"{mark} {text}", text_color=ENGINE_COLORS[level])
+        self.model_label.configure(text=text)
 
     def _recover_model(self):
         """Sem modelo e sem carga em curso (falha CUDA, VRAM cheia): tenta de novo o modelo salvo."""
@@ -4196,9 +4263,7 @@ class App:
         # Set the gate on Tk's thread before launching work: queued hotkeys cannot race it.
         self.transcriber.model_loading.set()
         self.record_btn.configure(state="disabled")
-        self.apply_model_btn.configure(state="disabled")
-        self.model_choice.configure(state="disabled")
-        self.device_choice.configure(state="disabled")
+        self._set_model_picker("disabled")
         self.model_label.configure(text="Preparando modelo...")
         threading.Thread(target=self._load_model, args=(selection, persist), daemon=True).start()
 
@@ -4222,10 +4287,10 @@ class App:
                 self.status_queue.put(f"Modelo ativo, mas nao foi possivel salvar a preferencia: {e}")
         self.model_label.configure(text=config.label if config else "Modelo indisponivel")
         self.record_btn.configure(state="normal" if ready else "disabled")
-        self.apply_model_btn.configure(state="normal")
-        self.model_choice.configure(state="readonly")
-        self.device_choice.configure(state="readonly")
+        self._set_model_picker("normal")
+        self._engine_shown = None  # o proximo poll reescreve EM USO e o cabecalho
         if error:
+            self._show_model_selection()
             self.status_queue.put("ERRO ao carregar: " + error +
                                   (" — modelo anterior mantido." if ready else " — escolha modelo menor ou CPU e aplique."))
 
@@ -4247,6 +4312,7 @@ class App:
         # olho le como travamento.
         if self.bar.visivel() and not self.transcriber.busy():
             self.bar.finish()
+        self._update_engine_now()
         try:
             while True:
                 event, payload = self.hotkey_queue.get_nowait()

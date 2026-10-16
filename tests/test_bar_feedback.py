@@ -84,7 +84,7 @@ class AppFeedbackTests(unittest.TestCase):
         ui.transcriber.history_queue = queue.Queue()
         ui.settings = {'capture_mode': 'microfone'}
         ui._device_index = Mock(return_value=None)
-        ui._pc_device_index = Mock(return_value=None)
+        ui._device_source = Mock(return_value=None)
         ui.bar = Mock()
         ui.bar.visivel.return_value = False
         ui.record_btn = Mock()

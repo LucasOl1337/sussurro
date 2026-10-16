@@ -4,11 +4,16 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Microfone sem lixo:** a lista mostra só **Padrão do PC** e os microfones conectados de verdade (`MCHOSE X9`, `FIFINE Microphone`), sem os plugins do ALSA (`lavrate`, `speex`, `upmix`, `vdownmix`...). Escolher um mic específico grava dele mesmo com o PipeWire segurando o aparelho.
+- **Trocar o modelo é um clique:** escolher em MODELO ou EXECUTAR EM já carrega. Antes o combo mudava e o ditado continuava no modelo antigo até clicar em **Aplicar modelo**, que passava despercebido: desde 10/10 nenhum ditado tinha saído na nuvem.
+- **EM USO AGORA** diz com certeza o que transcreve o próximo trecho (`Grok (xAI) · nuvem`, `Large-v3 · GPU NVIDIA`) e avisa em laranja quando a nuvem caiu e o Turbo local assumiu, ou quando o outro provedor respondeu. O status de cada trecho e o histórico (`engine`) registram o motor que de fato transcreveu.
+- Saiu o combo **Canal do PC**: o áudio do PC é sempre a saída padrão do sistema.
+
 - **Ditado na nuvem, opcional:** o seletor ganha **ElevenLabs Scribe** e **Grok (xAI)**. Não ocupam VRAM (o Large-v3 local prende 2,1 GB mesmo parado) e acertam mais termos técnicos: 29 e 28 de 31 nos ditados reais, contra 18 do Large-v3. Custam de 1,5 a 3 s por trecho. Credencial só por variável de ambiente, chaveiro (`secret-tool ... servico elevenlabs tipo api-key`) ou login do Grok CLI; nada vai pro `settings.json`.
 - Se a nuvem falhar, o mesmo trecho sai no Turbo local, que carrega na hora; por 60 s o ditado fica no local e depois tenta a nuvem de novo. O Turbo emprestado sai da VRAM após 2 min ocioso (fica ~200 MB de contexto CUDA até reabrir o app). Reunião continua sempre local.
 - O seletor fica só com **Turbo**, **Large-v3**, **ElevenLabs Scribe** e **Grok**. Automático, Tiny, Base, Small, Medium e Parakeet saíram; quem usava um deles passa pro Turbo. As dependências do Parakeet (`onnx-asr`, `onnx`, `onnxconverter-common`) saíram do `requirements-cuda.txt`; o cache em `~/.cache/sussurro/models/parakeet-*` pode ser apagado.
 - COMPARAR traz os modelos de nuvem desmarcados, pra nenhuma frase sair do PC sem você marcar.
-- **Refazer** no histórico dispara na hora com o modelo e o idioma atuais do Sussurro, sem abrir diálogo. Pra tentar outro motor, troca no seletor e aplica.
+- **Refazer** no histórico dispara na hora com o modelo e o idioma atuais do Sussurro, sem abrir diálogo. Pra tentar outro motor, troca no seletor.
 - A Biblioteca não quebra mais o Refazer quando o Whisper escreve termo hifenizado (`claude-code` → `Claude Code`). O erro `KeyError: 'claude code'` nas 11h04 vinha daí.
 - Ditar com a janela do Sussurro em foco volta a só salvar no histórico, sem colar, sem erro e sem Enter automático. A v0.7.0 marcava esses ditados como falha.
 - `sussurro transcribe` (áudio do WhatsApp pelo Hermes) não disputa mais o modelo com um ditado em andamento: responde ocupado em JSON e o Hermes pode tentar de novo.

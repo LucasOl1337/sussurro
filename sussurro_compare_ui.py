@@ -107,7 +107,7 @@ class ComparisonPanel(ctk.CTkFrame):
             return False
         self.reserved = True
         self.host.record_btn.configure(state='disabled')
-        self.host.apply_model_btn.configure(state='disabled')
+        self.host._set_model_picker('disabled')
         return True
 
     def release(self):
@@ -117,7 +117,7 @@ class ComparisonPanel(ctk.CTkFrame):
             if not self.closed:
                 ready = self.host.transcriber.model is not None and not self.host.transcriber.model_loading.is_set()
                 self.host.record_btn.configure(state='normal' if ready else 'disabled')
-                self.host.apply_model_btn.configure(state='normal')
+                self.host._set_model_picker('normal')
 
     def controls(self, busy, recording=False):
         self.record.configure(state='normal' if recording or not busy else 'disabled',
