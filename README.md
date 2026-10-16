@@ -2,7 +2,7 @@
 
 Ditado para Windows e Linux: fale no microfone e o texto aparece digitado/colado onde o cursor estiver. Com modelo local (Turbo ou Large-v3) tudo roda na sua máquina e nenhum áudio sai do computador. A nuvem (ElevenLabs Scribe ou Grok da xAI) é opcional, só para o ditado, e cai pro Turbo local se a rede falhar.
 
-[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.7.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.7.0) · [Changelog](CHANGELOG.md)
+[Site](https://lucasol1337.github.io/sussurro/) · [Release v0.8.0](https://github.com/LucasOl1337/sussurro/releases/tag/v0.8.0) · [Changelog](CHANGELOG.md)
 
 O caminho do áudio é: **microfone → Silero VAD (segmentação de fala) → faster-whisper Turbo/Large-v3 local ou STT na nuvem**, com uma HUD Tkinter discreta e uma barra de overlay que indica gravação/transcrição.
 

@@ -4,6 +4,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+## [0.8.0] — 2026-10-16
+
 - **Microfone sem lixo:** a lista mostra só **Padrão do PC** e os microfones conectados de verdade (`MCHOSE X9`, `FIFINE Microphone`), sem os plugins do ALSA (`lavrate`, `speex`, `upmix`, `vdownmix`...). Escolher um mic específico grava dele mesmo com o PipeWire segurando o aparelho.
 - **Trocar o modelo é um clique:** escolher em MODELO ou EXECUTAR EM já carrega. Antes o combo mudava e o ditado continuava no modelo antigo até clicar em **Aplicar modelo**, que passava despercebido: desde 10/10 nenhum ditado tinha saído na nuvem.
 - **EM USO AGORA** diz com certeza o que transcreve o próximo trecho (`Grok (xAI) · nuvem`, `Large-v3 · GPU NVIDIA`) e avisa em laranja quando a nuvem caiu e o Turbo local assumiu, ou quando o outro provedor respondeu. O status de cada trecho e o histórico (`engine`) registram o motor que de fato transcreveu.
