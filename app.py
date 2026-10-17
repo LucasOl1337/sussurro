@@ -88,7 +88,8 @@ from sussurro_hardware import (detect_hardware, execution_device_labels,
                                execution_hardware_note)
 from sussurro_models import (LOCAL_DEFAULT, MODEL_LABELS, DEFAULT_MODEL_SETTINGS, engine_label, fallback_config,
                              normalize_model_settings, resolve_model_config, model_path)
-from sussurro_cloud import PROVIDER_NAMES, CloudError, CloudModel, require_credentials
+from sussurro_cloud import ELEVENLABS, PROVIDER_NAMES, XAI, CloudError, CloudModel, is_cloud, require_credentials
+from sussurro_usage import fmt_credits, fmt_minutes, fmt_usd, shared_ledger, spend_line
 import sussurro_sounds
 from sussurro_meeting import drop_hallucinations
 from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -3432,11 +3433,19 @@ class App:
         self.device_choice = combo(list(self.device_labels.values()),
                                    self.device_labels[self.settings["whisper_device"]],
                                    lambda _: self._apply_model(), 7, 1)
-        self.engine_now = ctk.CTkLabel(card, text="● carregando o modelo...", height=32,
+        for picker in (self.model_choice, self.device_choice):
+            picker.grid_configure(sticky="new")  # a linha de gasto embaixo nao empurra os combos
+        now_cell = ctk.CTkFrame(card, fg_color="transparent")
+        now_cell.grid(row=7, column=2, sticky="new", padx=CPAD, pady=(6, 0))
+        self.engine_now = ctk.CTkLabel(now_cell, text="● carregando o modelo...", height=32,
                                        text_color=ENGINE_COLORS["aviso"], anchor="w",
                                        justify="left", wraplength=340,
                                        font=(self.FONT_UI, 12, "bold"))
-        self.engine_now.grid(row=7, column=2, sticky="ew", padx=CPAD, pady=(6, 0))
+        self.engine_now.pack(fill="x")
+        # gasto do mes do provedor escolhido; some com modelo local
+        self.cloud_spend = ctk.CTkLabel(now_cell, text="", text_color=INK_3, anchor="w", height=14,
+                                        justify="left", wraplength=340, font=(self.FONT_UI, 11))
+        self._spend_shown = None
         self._engine_shown = None
         self.sounds_var = tk.BooleanVar(value=bool(self.settings["feedback_sounds"]))
         ctk.CTkSwitch(card, text="Sons de inicio, fim e erro", variable=self.sounds_var,
@@ -3646,6 +3655,9 @@ class App:
         self.status.configure(text="Transcricao copiada para a area de transferencia.")
 
     def _retry_entry(self, entry: dict):
+        # a lista desenha copias (com audio_removed): a marca de "refazendo" tem que ir na
+        # entrada de self.entries, senao _add_history nunca destrava o MODELO e o GRAVAR
+        entry = next((e for e in self.entries if e.get("wav") == entry.get("wav")), entry)
         if not (HISTORY_DIR / entry["wav"]).is_file():
             self.status.configure(text="Áudio não disponível. O texto do histórico foi mantido.")
             return
@@ -3752,6 +3764,35 @@ class App:
             ctk.CTkLabel(head, text=nota, text_color=INK_3, height=12,
                          font=(self.FONT_UI, 10)).pack(side="right")
 
+    def _render_cloud_spend(self):
+        """Linha de gasto na nuvem: aparece depois do primeiro ditado na nuvem."""
+        ledger = shared_ledger()
+        el, grok = ledger.month(ELEVENLABS), ledger.month(XAI)
+        if not (ledger.total(ELEVENLABS)["calls"] or ledger.total(XAI)["calls"]):
+            return
+        ledger.refresh_balance()
+        if ledger.balance and ledger.balance["limit"]:
+            b = ledger.balance
+            reset = (datetime.fromtimestamp(b["reset"]).strftime("renova em %d/%m")
+                     if b.get("reset") else "")
+            saldo = (fmt_credits(max(0, b["limit"] - b["used"])),
+                     f"de {fmt_credits(b['limit'])} créditos" + (f" · {reset}" if reset else ""))
+        else:
+            saldo = ("—", ledger.balance_error or "buscando...")
+        cards = (
+            ("ELEVENLABS ESTE MÊS", f"{fmt_credits(el['credits'])} créditos",
+             f"{fmt_usd(el['usd'])} · {fmt_minutes(el['audio_s'])} em {el['calls']} pedidos"),
+            ("SALDO ELEVENLABS", *saldo),
+            ("GROK ESTE MÊS", fmt_minutes(grok["audio_s"]),
+             f"{grok['calls']} pedidos · a xAI não informa custo"),
+        )
+        grade = ctk.CTkFrame(self.stats_frame, fg_color="transparent")
+        grade.pack(fill="x")
+        for col in range(len(cards)):
+            grade.grid_columnconfigure(col, weight=1, uniform="nuvem")
+        for i, (rotulo, valor, nota) in enumerate(cards):
+            self._stat_card(grade, rotulo, valor, nota, 0, i)
+
     def _render_stats(self):
         """Redesenha a aba inteira a partir do historico em memoria."""
         for child in self.stats_frame.winfo_children():
@@ -3785,6 +3826,8 @@ class App:
             grade.grid_columnconfigure(col, weight=1, uniform="stat")
         for i, (rotulo, valor, nota) in enumerate(cards):
             self._stat_card(grade, rotulo, valor, nota, 0, i)
+
+        self._render_cloud_spend()
 
         # mapa, horas e palavras dividem a linha de baixo: cresce pro lado, nao pra baixo
         baixo = ctk.CTkFrame(self.stats_frame, fg_color="transparent")
@@ -4252,6 +4295,27 @@ class App:
         self.engine_now.configure(text=f"{mark} {text}", text_color=ENGINE_COLORS[level])
         self.model_label.configure(text=text)
 
+    def _update_cloud_spend(self):
+        """Gasto do mes embaixo do EM USO AGORA, so com modelo de nuvem escolhido."""
+        if getattr(self, "cloud_spend", None) is None:
+            return
+        ledger = shared_ledger()
+        if self._tab == "estatisticas" and ledger.version != getattr(self, "_spend_version", None):
+            self._spend_version = ledger.version
+            self._render_stats()  # gasto ou saldo novo com a aba aberta
+        model = normalize_model_settings(self.settings)["whisper_model"]
+        if model == ELEVENLABS:
+            ledger.refresh_balance()
+        text = spend_line(shared_ledger(), model) if is_cloud(model) else ""
+        if text == self._spend_shown:
+            return
+        self._spend_shown = text
+        if text:
+            self.cloud_spend.configure(text=text)
+            self.cloud_spend.pack(fill="x", pady=(0, 2))
+        else:
+            self.cloud_spend.pack_forget()
+
     def _recover_model(self):
         """Sem modelo e sem carga em curso (falha CUDA, VRAM cheia): tenta de novo o modelo salvo."""
         if (self.transcriber.model is not None or self.transcriber.model_loading.is_set()
@@ -4313,6 +4377,7 @@ class App:
         if self.bar.visivel() and not self.transcriber.busy():
             self.bar.finish()
         self._update_engine_now()
+        self._update_cloud_spend()
         try:
             while True:
                 event, payload = self.hotkey_queue.get_nowait()

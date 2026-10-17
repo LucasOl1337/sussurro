@@ -132,7 +132,7 @@ def segments_from_words(items, text, duration, gap=SPLIT_GAP_S):
 class CloudModel:
     """Adaptador com `transcribe()` compativel com o faster-whisper."""
 
-    def __init__(self, provider, *, http=None, secrets=None, fallback=True):
+    def __init__(self, provider, *, http=None, secrets=None, fallback=True, usage=None):
         if provider not in PROVIDERS:
             raise ValueError(f"provedor de nuvem desconhecido: {provider}")
         self.provider = provider
@@ -142,7 +142,12 @@ class CloudModel:
         if http is None:
             import httpx
             http = httpx.Client(http2=False, headers={"User-Agent": "Sussurro"})
+            if usage is None:  # so pedido de verdade entra no livro de gasto
+                from sussurro_usage import shared_ledger
+                usage = shared_ledger()
         self._http = http
+        self._usage = usage
+        self._last_headers = None  # cabecalhos da ultima resposta: a ElevenLabs manda o custo neles
 
     def available(self):
         """Provedores com credencial, o escolhido primeiro."""
@@ -175,6 +180,8 @@ class CloudModel:
                 errors.append(f"{PROVIDER_NAMES[provider]}: resposta invalida ({type(error).__name__})")
                 continue
             self.last_provider = provider
+            if self._usage is not None:
+                self._usage.record(provider, duration, self._last_headers)
             info.language = detected or info.language
             return segments, info
         raise CloudError("; ".join(errors) or self._secrets.missing_message(self.provider))
@@ -189,6 +196,7 @@ class CloudModel:
         import httpx
         try:
             response = self._http.post(url, timeout=self._timeout(duration), **kwargs)
+            self._last_headers = getattr(response, "headers", None)
         except httpx.TimeoutException as error:
             raise CloudError("sem resposta a tempo") from error
         except httpx.HTTPError as error:

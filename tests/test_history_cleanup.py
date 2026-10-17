@@ -119,7 +119,8 @@ class HistoryCleanupTests(unittest.TestCase):
         self.assertEqual(self.t.prune_history_audio(30, confirmed=True, now=self.now)['deleted'], 0)
 
     def ui(self):
-        return SimpleNamespace(root=None, _playing=None, status=Mock(), transcriber=self.t, _render_history=Mock())
+        return SimpleNamespace(root=None, _playing=None, status=Mock(), transcriber=self.t, _render_history=Mock(),
+                               entries=self.entries)
 
     def test_ui_cancel_age_or_confirmation_has_no_effect_on_disk(self):
         for days, approve in [(None, True), (30, False)]:

@@ -4,6 +4,9 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Refazer não trava mais o MODELO:** depois de um Refazer, os combos MODELO e EXECUTAR EM ficavam cinzas até reabrir o app, então não dava pra voltar pro Turbo local ou trocar pro Grok. A marca de "refazendo" caía numa cópia da entrada que a lista desenha, e o fim do Refazer nunca destravava os combos.
+- **Gasto da nuvem:** embaixo do EM USO AGORA aparece o gasto do mês do provedor escolhido. A ElevenLabs mostra créditos e dólares, lidos dos cabeçalhos `character-cost` e `fiat-cost-before-overages` de cada transcrição, e o Grok mostra minutos e pedidos, porque a xAI não devolve custo. A aba ESTATÍSTICAS ganha a mesma conta e o saldo da conta ElevenLabs (`/v1/user/subscription`), que só aparece se a chave tiver a permissão `user_read`. O livro fica em `cloud-usage.json`, ao lado do app, sem texto nem áudio. Só pedidos de verdade contam, inclusive Refazer e COMPARAR.
+
 ## [0.8.0] — 2026-10-16
 
 - **Microfone sem lixo:** a lista mostra só **Padrão do PC** e os microfones conectados de verdade (`MCHOSE X9`, `FIFINE Microphone`), sem os plugins do ALSA (`lavrate`, `speex`, `upmix`, `vdownmix`...). Escolher um mic específico grava dele mesmo com o PipeWire segurando o aparelho.

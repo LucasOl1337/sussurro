@@ -247,6 +247,7 @@ class HistoryRetryUiTests(unittest.TestCase):
             record_btn=Mock(),
             _set_model_picker=Mock(),
             _render_history=Mock(),
+            entries=[entry],
         )
         ui.transcriber.retry_history_async.side_effect = RuntimeError('Aguarde o trabalho atual terminar.')
         with tempfile.TemporaryDirectory() as directory:
