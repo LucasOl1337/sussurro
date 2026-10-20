@@ -4,6 +4,8 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+## [0.9.0] — 2026-10-20
+
 - **Reunião na nuvem:** a aba REUNIÃO ganha o combo **MOTOR** (Local, Grok ou ElevenLabs), salvo em `meeting_engine`. Com Grok ou ElevenLabs, o provedor transcreve e separa as vozes (`diarize`), sem Nemotron nem GPU, pro notebook sem NVIDIA gravar reunião com quem falou o quê. Cada lado sobe uma vez em Opus 32k só com os trechos de fala, os dois em paralelo, e a transcrição não segura o ditado nem a troca de modelo. Arquivo importado com número fixo de falantes passa o número pra ElevenLabs (`num_speakers`). Reunião real de 9 min: 10 s no Grok, 14 s na ElevenLabs. O padrão continua Local.
 - **Refazer não trava mais o MODELO:** depois de um Refazer, os combos MODELO e EXECUTAR EM ficavam cinzas até reabrir o app, então não dava pra voltar pro Turbo local ou trocar pro Grok. A marca de "refazendo" caía numa cópia da entrada que a lista desenha, e o fim do Refazer nunca destravava os combos.
 - **Gasto da nuvem:** embaixo do EM USO AGORA aparece o gasto do mês do provedor escolhido. A ElevenLabs mostra créditos e dólares, lidos dos cabeçalhos `character-cost` e `fiat-cost-before-overages` de cada transcrição, e o Grok mostra minutos e pedidos, porque a xAI não devolve custo. A aba ESTATÍSTICAS ganha a mesma conta e o saldo da conta ElevenLabs (`/v1/user/subscription`), que só aparece se a chave tiver a permissão `user_read`. O livro fica em `cloud-usage.json`, ao lado do app, sem texto nem áudio. Só pedidos de verdade contam, inclusive Refazer e COMPARAR.
