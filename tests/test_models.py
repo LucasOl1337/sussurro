@@ -345,6 +345,31 @@ class CloudTranscriberTests(unittest.TestCase):
         self.assertEqual(self.t.meeting_model(), (self.cloud, self.t.model_config))
         self.assertIsNone(self.t._local)
 
+    def test_cloud_meeting_engine_gets_its_own_model_without_the_lock(self):
+        own = Mock()
+        self.t.model_config = ModelConfig('large-v3', 'cuda', 'int8_float16')
+        with patch.object(app, 'CloudModel', return_value=own) as made, self.t._model_lock:
+            model, config = self.t.meeting_model(XAI)  # lock tomado pelo ditado: nao espera
+        made.assert_called_once_with(XAI)
+        own.check.assert_called_once()
+        self.assertIs(model, own)
+        self.assertEqual(config, ModelConfig(XAI, 'cloud', 'api'))
+        self.assertIsNone(self.t._local)  # nada de Turbo emprestado
+
+    def test_cloud_meeting_does_not_hold_model_swaps(self):
+        self.t.model = None  # modelo do ditado ainda carregando: reuniao na nuvem segue
+        self.t.begin_meeting_job(cloud=True)
+        self.assertEqual(self.t._meeting_jobs, 0)
+        self.t.end_meeting_job(cloud=True)
+        self.assertEqual(self.t._meeting_jobs, 0)
+        with self.assertRaisesRegex(RuntimeError, 'carregando'):
+            self.t.begin_meeting_job()
+
+    def test_meeting_engine_setting_is_normalized(self):
+        from sussurro_models import normalize_meeting_engine
+        self.assertEqual([normalize_meeting_engine(v) for v in (XAI, ELEVENLABS, 'local', 'large-v3', None)],
+                         [XAI, ELEVENLABS, 'local', 'local', 'local'])
+
     def test_switch_to_cloud_without_credentials_keeps_current_model(self):
         current, config = Mock(), ModelConfig('large-v3', 'cuda', 'int8_float16')
         self.t.model, self.t.model_config = current, config

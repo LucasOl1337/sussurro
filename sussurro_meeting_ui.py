@@ -1,5 +1,6 @@
-"""Aba REUNIAO: grava voce e o audio do PC em duas trilhas, transcreve na GPU com quem
-falou o que, e abre reunioes antigas. Toda chamada de widget acontece na thread do Tk."""
+"""Aba REUNIAO: grava voce e o audio do PC em duas trilhas, transcreve (local na GPU ou
+na nuvem, pelo seletor MOTOR) com quem falou o que, e abre reunioes antigas. Toda chamada
+de widget acontece na thread do Tk."""
 import json
 import queue
 import subprocess
@@ -14,6 +15,8 @@ import customtkinter as ctk
 
 import sussurro_meeting as meeting
 import sussurro_meeting_audio as rec
+from sussurro_cloud import is_cloud
+from sussurro_models import MEETING_ENGINES, normalize_meeting_engine
 
 BG = '#1b1c20'
 FIELD = '#25262b'
@@ -30,6 +33,14 @@ WAVE_PC = '#7aa2c8'
 SPEAKER_COLORS = ('#f07944', '#7aa2c8', '#9ccf8a', '#d7a6e8', '#e6c86e', '#6fd0c4', '#e88f8f', '#b0b8c0')
 LANG_CHOICES = ('pt', 'en', 'auto')
 SPEAKER_CHOICES = ('Automático', '1', '2', '3', '4', '5', '6', '7', '8')
+ENGINE_VALUES = {label: key for key, label in MEETING_ENGINES.items()}
+ABOUT = {
+    'local': 'Grava o microfone padrão e o que o PC toca, em trilhas separadas. Nenhum bot entra na call e nada '
+             'sai da máquina. Tudo é transcrito no PC com o modelo do ditado (na GPU, se houver).',
+    'cloud': 'Grava o microfone padrão e o que o PC toca, em trilhas separadas. Nenhum bot entra na call. Ao parar, '
+             'só os trechos com som de cada lado vão para {name}, que transcreve e separa as vozes; o áudio e a '
+             'transcrição ficam no PC.',
+}
 
 
 def _select_on_focus(entry):
@@ -56,6 +67,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.line_at = []            # (linha do texto, inicio em ms)
         self.visible = False
         self.closed = False
+        self.job_engine = 'local'    # motor do trabalho em curso (fixo do inicio ao fim)
 
         self.ready_view = self._build_ready()
         self.work_view = self._build_work()
@@ -153,14 +165,35 @@ class MeetingPanel(ctk.CTkFrame):
         ctk.CTkLabel(imports, text='Falantes:', text_color=MUTED, font=self.font).pack(side='left', padx=(12, 6))
         self.speakers = self._combo(imports, SPEAKER_CHOICES, 'Automático', 120)
         self.speakers.pack(side='left')
-        ctk.CTkLabel(view, text='Grava o microfone padrão e o que o PC toca, em trilhas separadas. Nenhum bot entra '
-                                'na call e nada sai da máquina. Tudo é transcrito na GPU; o modelo é o do ditado.',
-                     text_color=MUTED, font=(self.host.FONT_UI, 11), anchor='w', justify='left',
-                     wraplength=680).pack(fill='x', padx=16, pady=(16, 0))
+        engine = normalize_meeting_engine(self.host.settings.get('meeting_engine'))
+        self.engine = self._combo(imports, list(ENGINE_VALUES), MEETING_ENGINES[engine], 230,
+                                  command=self._on_engine)
+        self.engine.pack(side='right')
+        ctk.CTkLabel(imports, text='MOTOR', text_color=MUTED, font=(self.host.FONT_UI, 10, 'bold')).pack(
+            side='right', padx=(12, 6))
+        self.about = ctk.CTkLabel(view, text='', text_color=MUTED, font=(self.host.FONT_UI, 11), anchor='w',
+                                  justify='left', wraplength=680)
+        self.about.pack(fill='x', padx=16, pady=(16, 0))
+        self._describe_engine(engine)
         self.ready_status = ctk.CTkLabel(view, text='', text_color=INK_2, font=self.font, anchor='w',
                                          justify='left', wraplength=680)
         self.ready_status.pack(fill='x', padx=16, pady=(8, 0))
         return view
+
+    def selected_engine(self):
+        return ENGINE_VALUES.get(self.engine.get(), 'local')
+
+    def _describe_engine(self, engine):
+        if is_cloud(engine):
+            self.about.configure(text=ABOUT['cloud'].format(name=MEETING_ENGINES[engine].split(' · ')[0]))
+        else:
+            self.about.configure(text=ABOUT['local'])
+
+    def _on_engine(self, _label=None):
+        engine = self.selected_engine()
+        self.host.settings['meeting_engine'] = engine
+        self.host._save()
+        self._describe_engine(engine)
 
     def _build_work(self):
         view = ctk.CTkFrame(self, fg_color='transparent')
@@ -361,13 +394,17 @@ class MeetingPanel(ctk.CTkFrame):
 
     # -- transcricao ---------------------------------------------------------
     def _run_job(self, stage, work):
-        """Roda `work` numa thread, com o modelo do ditado emprestado (nao troca no meio)."""
+        """Roda `work` numa thread. Motor local: o modelo do ditado fica emprestado (nao troca
+        no meio). Motor de nuvem: modelo proprio, o ditado segue livre."""
         transcriber = self.host.transcriber
+        engine = self.selected_engine()
+        cloud = is_cloud(engine)
         try:
-            transcriber.begin_meeting_job()
+            transcriber.begin_meeting_job(cloud=cloud)
         except RuntimeError as error:
             self._set_ready_text(f'{error} O áudio está guardado; tente de novo em seguida.')
             return False
+        self.job_engine = engine
         self.abort = threading.Event()
         self._show(self.work_view)
         self.work_stage.configure(text=stage)
@@ -384,7 +421,7 @@ class MeetingPanel(ctk.CTkFrame):
             except Exception as error:  # a gravacao fica na pasta; o erro vai pra tela
                 self.events.put(('error', f'{type(error).__name__}: {error}'))
             finally:
-                transcriber.end_meeting_job()
+                transcriber.end_meeting_job(cloud=cloud)
 
         threading.Thread(target=run, name='sussurro-reuniao', daemon=True).start()
         return True
@@ -396,9 +433,19 @@ class MeetingPanel(ctk.CTkFrame):
         """Transcreve a pasta (gravacao com duas trilhas ou arquivo importado) e grava o resultado."""
         manifest = rec.read_manifest(folder)
         transcriber = self.host.transcriber
-        # modelo de nuvem no ditado: a reuniao empresta o Turbo local (nada sai do PC)
-        model, config = transcriber.meeting_model()
-        lock = transcriber._model_lock
+        # Local: modelo do ditado (ou o Turbo emprestado, se o ditado for de nuvem). Nuvem:
+        # CloudModel proprio, sem o lock do ditado.
+        model, config = transcriber.meeting_model(self.job_engine)
+        cloud = is_cloud(self.job_engine)
+        lock = None if cloud else transcriber._model_lock
+        try:
+            return self._transcribe_with(folder, manifest, model, config, lock)
+        finally:
+            if cloud:
+                model.close()
+
+    def _transcribe_with(self, folder, manifest, model, config, lock):
+        transcriber = self.host.transcriber
         language = manifest.get('language', 'pt')
         started = time.perf_counter()
         if manifest.get('imported'):

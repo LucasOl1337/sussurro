@@ -13,6 +13,9 @@ Credenciais, sem nada salvo em settings.json:
   Token perto de vencer e renovado pelo proprio CLI, dono das travas do arquivo.
 - ElevenLabs: `ELEVENLABS_API_KEY` ou o chaveiro (`secret-tool lookup servico elevenlabs
   tipo api-key`).
+
+Reuniao: `transcribe(..., diarize=True, compress=True)` manda o audio em Ogg/Opus (uma
+hora de fala vira ~15 MB) e pede ao provedor quem fala cada palavra (`Word.speaker`).
 """
 import json
 import os
@@ -55,6 +58,7 @@ class Word:
     end: float
     word: str
     probability: float = 1.0
+    speaker: object = None  # so com diarize: id do falante como o provedor manda
 
 
 @dataclass
@@ -69,6 +73,17 @@ class Segment:
 
 def is_cloud(model: str) -> bool:
     return model in PROVIDERS
+
+
+ISO3 = {"por": "pt", "eng": "en", "spa": "es", "fra": "fr", "deu": "de", "ita": "it", "nld": "nl"}
+
+
+def short_language(code):
+    """'por' (ElevenLabs) e 'pt-BR'/'es-mx' (xAI) viram 'pt'/'es'; vazio vira None."""
+    if not code or code == "auto":
+        return None
+    base = str(code).split("-")[0].split("_")[0].lower()
+    return ISO3.get(base, base)
 
 
 def keyterms(hotwords) -> list:
@@ -102,27 +117,46 @@ def wav_bytes(audio) -> bytes:
     return buffer.getvalue()
 
 
-def segments_from_words(items, text, duration, gap=SPLIT_GAP_S):
-    """Agrupa as palavras em segmentos, cortando nas pausas longas.
+def opus_bytes(audio):
+    """Ogg/Opus de voz (32 kbps) pelo ffmpeg; None sem ffmpeg ou sem libopus."""
+    if not shutil.which("ffmpeg"):
+        return None
+    raw = np.asarray(audio, dtype="<f4").reshape(-1).tobytes()
+    try:
+        result = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "f32le",
+                                 "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
+                                 "-c:a", "libopus", "-b:a", "32k", "-application", "voip",
+                                 "-f", "ogg", "pipe:1"], input=raw, capture_output=True, timeout=600)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 and result.stdout else None
 
-    `items` sao (texto, inicio, fim, e_palavra): pecas sem tempo ou de espaco
+
+def segments_from_words(items, text, duration, gap=SPLIT_GAP_S):
+    """Agrupa as palavras em segmentos, cortando nas pausas longas e na troca de falante.
+
+    `items` sao (texto, inicio, fim, e_palavra[, falante]): pecas sem tempo ou de espaco
     (ElevenLabs manda o espaco como item proprio) so entram no texto do segmento.
     """
-    segments, current, pieces, last_end = [], [], [], None
+    segments, current, pieces, last_end, last_speaker = [], [], [], None, None
 
     def close():
         body = "".join(pieces).strip()
         if body and current:
             segments.append(Segment(current[0].start, current[-1].end, " " + body, list(current)))
 
-    for piece, start, end, is_word in items:
-        if is_word and start is not None and last_end is not None and start - last_end >= gap:
+    for item in items:
+        piece, start, end, is_word = item[:4]
+        speaker = item[4] if len(item) > 4 else None
+        if (is_word and start is not None and last_end is not None
+                and (start - last_end >= gap or speaker != last_speaker)):
             close()
             current, pieces = [], []
         pieces.append(piece)
         if is_word and start is not None:
-            current.append(Word(float(start), float(max(end, start)), piece.strip()))
+            current.append(Word(float(start), float(max(end, start)), piece.strip(), speaker=speaker))
             last_end = float(max(end, start))
+            last_speaker = speaker
     close()
     if not segments and text and text.strip():
         segments = [Segment(0.0, duration, " " + text.strip())]
@@ -131,6 +165,8 @@ def segments_from_words(items, text, duration, gap=SPLIT_GAP_S):
 
 class CloudModel:
     """Adaptador com `transcribe()` compativel com o faster-whisper."""
+
+    supports_diarization = True  # a reuniao usa os falantes do provedor no lugar do Nemotron
 
     def __init__(self, provider, *, http=None, secrets=None, fallback=True, usage=None):
         if provider not in PROVIDERS:
@@ -161,18 +197,22 @@ class CloudModel:
             raise CloudError(self._secrets.missing_message(self.provider))
 
     def transcribe(self, audio, language=None, beam_size=5, vad_filter=False, hotwords=None,
-                   word_timestamps=False, **_):
+                   word_timestamps=False, diarize=False, speakers=None, compress=False, **_):
+        """`diarize` pede o falante de cada palavra (`speakers` fixa quantos, so ElevenLabs);
+        `compress` manda Opus em vez de PCM, para audio longo de reuniao."""
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         duration = audio.size / SAMPLE_RATE
         info = SimpleNamespace(language=language or "auto", language_probability=0.0, duration=duration)
         if audio.size < SAMPLE_RATE // 10:  # ElevenLabs recusa < 100 ms; toque acidental
             return [], info
         terms = keyterms(hotwords)
+        packed = opus_bytes(audio) if compress else None
+        options = {"diarize": diarize, "speakers": speakers, "packed": packed, "long": compress}
         errors = []
         for provider in self.available() or [self.provider]:
             try:
                 call = self._xai if provider == XAI else self._elevenlabs
-                segments, detected = call(audio, duration, language, terms)
+                segments, detected = call(audio, duration, language, terms, **options)
             except CloudError as error:
                 errors.append(f"{PROVIDER_NAMES[provider]}: {error}")
                 continue
@@ -187,15 +227,17 @@ class CloudModel:
         raise CloudError("; ".join(errors) or self._secrets.missing_message(self.provider))
 
     # -- provedores ---------------------------------------------------------
-    def _timeout(self, duration):
+    def _timeout(self, duration, long=False):
         import httpx
+        if long:  # reuniao: upload maior e o provedor ainda separa as vozes
+            return httpx.Timeout(60.0 + duration * 0.5, connect=10.0)
         # medido em 20 ditados reais: 60 s de fala voltam em ate ~5 s
         return httpx.Timeout(6.0 + duration * 0.2, connect=4.0)
 
-    def _post(self, url, duration, **kwargs):
+    def _post(self, url, duration, long=False, **kwargs):
         import httpx
         try:
-            response = self._http.post(url, timeout=self._timeout(duration), **kwargs)
+            response = self._http.post(url, timeout=self._timeout(duration, long), **kwargs)
             self._last_headers = getattr(response, "headers", None)
         except httpx.TimeoutException as error:
             raise CloudError("sem resposta a tempo") from error
@@ -217,16 +259,19 @@ class CloudModel:
         detail = re.sub(r"[A-Za-z0-9_\-.]{20,}", "***", str(detail))
         raise CloudError(f"HTTP {response.status_code}: {detail[:160]}")
 
-    def _xai(self, audio, duration, language, terms):
-        data = {"model": XAI_MODEL, "format": "true"}
-        if language:
-            data["language"] = language
+    def _xai(self, audio, duration, language, terms, diarize=False, speakers=None, packed=None, long=False):
+        data = {"model": XAI_MODEL}
+        if language:  # format=true sem idioma volta HTTP 400
+            data.update(language=language, format="true")
         if terms:
             data["keyterm"] = terms  # httpx repete o campo pra cada item
-        files = {"file": ("ditado.wav", wav_bytes(audio), "audio/wav")}
+        if diarize:
+            data["diarize"] = "true"
+        upload = ("reuniao.ogg", packed, "audio/ogg") if packed else ("ditado.wav", wav_bytes(audio), "audio/wav")
+        files = {"file": upload}
 
         def post(token):
-            return self._post(XAI_URL, duration, data=data, files=files,
+            return self._post(XAI_URL, duration, long, data=data, files=files,
                               headers={"Authorization": f"Bearer {token}"})
 
         token = self._secrets.xai_token()
@@ -240,24 +285,35 @@ class CloudModel:
         if response.status_code != 200:
             self._fail(response)
         body = response.json()
-        items = [(w.get("text", "") + " ", w.get("start"), w.get("end"), True)
+        items = [(w.get("text", "") + " ", w.get("start"), w.get("end"), True,
+                  w.get("speaker") if diarize else None)
                  for w in body.get("words") or []]
         return segments_from_words(items, body.get("text", ""), duration), body.get("language")
 
-    def _elevenlabs(self, audio, duration, language, terms):
+    def _elevenlabs(self, audio, duration, language, terms, diarize=False, speakers=None, packed=None,
+                    long=False):
         data = {"model_id": ELEVENLABS_MODEL, "tag_audio_events": "false",
-                "timestamps_granularity": "word", "file_format": "pcm_s16le_16"}
+                "timestamps_granularity": "word"}
         if language:
             data["language_code"] = {"pt": "por", "en": "eng"}.get(language, language)
         if terms:
             data["keyterms"] = terms
-        response = self._post(ELEVENLABS_URL, duration, data=data,
-                              files={"file": ("ditado.pcm", pcm16(audio), "application/octet-stream")},
+        if diarize:
+            data["diarize"] = "true"
+            if speakers:
+                data["num_speakers"] = str(int(speakers))
+        if packed:
+            upload = ("reuniao.ogg", packed, "audio/ogg")
+        else:
+            data["file_format"] = "pcm_s16le_16"
+            upload = ("ditado.pcm", pcm16(audio), "application/octet-stream")
+        response = self._post(ELEVENLABS_URL, duration, long, data=data, files={"file": upload},
                               headers={"xi-api-key": self._secrets.elevenlabs_key()})
         if response.status_code != 200:
             self._fail(response)
         body = response.json()
-        items = [(w.get("text", ""), w.get("start"), w.get("end"), w.get("type") == "word")
+        items = [(w.get("text", ""), w.get("start"), w.get("end"), w.get("type") == "word",
+                  w.get("speaker_id") if diarize and w.get("type") == "word" else None)
                  for w in body.get("words") or [] if w.get("type") != "audio_event"]
         return segments_from_words(items, body.get("text", ""), duration), body.get("language_code")
 

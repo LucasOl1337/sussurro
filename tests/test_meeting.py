@@ -1,6 +1,7 @@
 """Reuniao: nivel, trechos com som, eco no microfone, linhas por falante e a saida em Markdown."""
 import re
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,6 +155,96 @@ class MeetingTests(unittest.TestCase):
         with self.assertRaises(m.Cancelled):
             speech = np.concatenate([silence(1), tone(1, 0.2), silence(1)])  # tom continuo e chao de ruido
             m.transcribe_meeting(speech, silence(3), "pt", FakeModel([]), find_voices=False, abort=abort)
+
+
+class FakeCloud:
+    """Faz as vezes do CloudModel: cada trecho com som do audio recebido vira as palavras
+    do roteiro, na ordem, com o falante que o provedor daria."""
+    supports_diarization = True
+
+    def __init__(self, scripts, language="por"):
+        # [(texto, falante), ...] por lado, um por trecho com som; os lados chegam em
+        # paralelo, entao o roteiro e escolhido pelo tamanho: o mais longo pega o primeiro
+        self.scripts = scripts
+        self.calls = []
+        self.language = language
+        self.lock = threading.Lock()
+
+    def transcribe(self, audio, language=None, **kwargs):
+        with self.lock:
+            self.calls.append(dict(kwargs, language=language, seconds=audio.size / RATE))
+        loud = m.frame_levels(audio) > 0.01  # quadros de 30 ms com som
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], loud.astype(np.int8), [0]))))
+        runs = [(a * m.FRAME / RATE, b * m.FRAME / RATE) for a, b in zip(edges[::2], edges[1::2])]
+        script = self.scripts[0 if len(self.scripts) == 1 or audio.size > RATE * 30 else 1]
+        segments = []
+        for (start, end), (text, who) in zip(runs, script):
+            parts = text.split()
+            step = (end - start) / len(parts)
+            words = [SimpleNamespace(word=w, start=start + k * step, end=start + (k + 1) * step, speaker=who)
+                     for k, w in enumerate(parts)]
+            segments.append(SimpleNamespace(words=words, no_speech_prob=0.0, end=end))
+        return segments, SimpleNamespace(language=self.language)
+
+
+class CloudMeetingTests(unittest.TestCase):
+    def test_compacted_time_maps_back_to_the_recording(self):
+        track = np.concatenate([silence(10), tone(2, 0.2), silence(20), tone(1, 0.2)])
+        regions = m.speech_regions([track], track.size)
+        audio, spans = m.compact(track, regions)
+        self.assertLess(audio.size, RATE * 5)  # 30 s de silencio nao sobem
+        first, second = spans[0], spans[1]
+        self.assertEqual(m.real_ms(spans, first[0] / RATE + 0.5), first[1] * 1000 // RATE + 500)
+        self.assertEqual(m.real_ms(spans, second[0] / RATE), second[1] * 1000 // RATE)
+        gap = (first[0] + first[2]) / RATE + 0.2  # palavra na pausa colada: fim do trecho anterior
+        self.assertEqual(m.real_ms(spans, gap), (first[1] + first[2]) * 1000 // RATE)
+
+    def test_two_sides_in_the_cloud_with_two_remote_voices_and_no_nemotron(self):
+        mic = np.concatenate([silence(40), tone(2, 0.2, 180), silence(40)])
+        pc = np.concatenate([tone(20, 0.2), silence(30), tone(20, 0.2, 300), silence(12)])
+        model = FakeCloud([
+            [("Bom dia, eu abro a reunião.", 0), ("E eu fecho, tchau gente.", 1)],  # lado do PC, mais som
+            [("Pode falar.", 0)]])
+        with patch.object(m, "_open_diarizer", side_effect=AssertionError("Nemotron nao roda na nuvem")):
+            result = m.transcribe_meeting(mic, pc, "auto", model)
+        self.assertEqual([(l.speaker, l.text) for l in result.lines],
+                         [("Remoto 1", "Bom dia, eu abro a reunião."), ("Você", "Pode falar."),
+                          ("Remoto 2", "E eu fecho, tchau gente.")])
+        self.assertAlmostEqual(result.lines[1].start_ms, 40_000, delta=400)
+        self.assertAlmostEqual(result.lines[2].start_ms, 50_000, delta=400)
+        self.assertEqual(result.language, "pt")
+        self.assertTrue(all(c["diarize"] and c["compress"] for c in model.calls))
+        self.assertLess(model.calls[0]["seconds"], 45)  # silencio do PC ficou de fora
+
+    def test_one_voice_per_side_keeps_plain_labels(self):
+        mic = np.concatenate([silence(36), tone(2, 0.2, 180), silence(3)])
+        pc = np.concatenate([tone(33, 0.2), silence(8)])
+        model = FakeCloud([[("Oi pessoal.", 0)], [("Pode falar.", 0)]])
+        result = m.transcribe_meeting(mic, pc, "pt", model, find_voices=False)
+        self.assertEqual([l.speaker for l in result.lines], ["Remoto", "Você"])
+        self.assertFalse(any(c["diarize"] for c in model.calls))
+        self.assertEqual(result.language, "pt")
+
+    def test_imported_file_asks_provider_for_the_fixed_count(self):
+        track = np.concatenate([silence(10), tone(8, 0.2), silence(15), tone(8, 0.2, 300), silence(10)])
+        model = FakeCloud([[("Primeira pessoa fala.", "a"), ("Segunda pessoa responde.", "b")]])
+        result = m.transcribe_single(track, "pt", 2, model)
+        self.assertEqual(model.calls[0]["speakers"], 2)
+        self.assertEqual([l.speaker for l in result.lines], ["Falante 1", "Falante 2"])
+        alone = FakeCloud([[("Só eu.", None)]])
+        result = m.transcribe_single(np.concatenate([silence(1), tone(3, 0.2), silence(1)]), "pt", 1, alone)
+        self.assertFalse(alone.calls[0]["diarize"])
+        self.assertEqual([l.speaker for l in result.lines], ["Falante 1"])
+
+    def test_cancel_before_upload_sends_nothing(self):
+        import threading
+        abort = threading.Event()
+        abort.set()
+        model = FakeCloud([[]])
+        with self.assertRaises(m.Cancelled):
+            m.transcribe_single(np.concatenate([silence(1), tone(3, 0.2), silence(1)]), "pt", None, model,
+                                abort=abort)
+        self.assertEqual(model.calls, [])
 
 
 class MarkdownTests(unittest.TestCase):

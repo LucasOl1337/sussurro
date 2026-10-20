@@ -131,8 +131,8 @@ A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas 
 - **Grok (xAI)** lê `XAI_API_KEY` ou reaproveita o login do Grok CLI (`~/.grok/auth.json`, criado por `grok login`). O token expirado é renovado pelo próprio CLI.
 - Nenhuma chave vai para `settings.json` nem aparece em log ou mensagem de erro. Sem credencial, o seletor recusa a troca e o modelo atual continua.
 - **Fallback:** se a nuvem falhar (rede, cota, timeout), o mesmo trecho é transcrito no Turbo local, que carrega na hora. Por 60 s os trechos seguintes vão direto pro local; depois a nuvem é tentada de novo e a barra avisa quando voltou. O Turbo emprestado sai da VRAM após 2 min sem uso; fica só o contexto CUDA do processo (~200 MB) até reabrir o app.
-- **Reunião é sempre local.** Com ditado na nuvem, a aba REUNIÃO usa o Turbo local, carregado só enquanto precisa.
-- Escolher um modelo de nuvem é escolher mandar o áudio do ditado para o provedor. Com modelo local, nada sai do PC.
+- **A reunião tem seu próprio MOTOR**, separado do ditado (veja [Reuniões](#reuniões-linux)). No padrão **Local**, com ditado na nuvem, a aba REUNIÃO usa o Turbo local, carregado só enquanto precisa.
+- Escolher um modelo de nuvem é escolher mandar o áudio do ditado para o provedor, e escolher um MOTOR de nuvem na reunião é mandar o áudio dela. Com modelo e motor locais, nada sai do PC.
 
 Se houver uma GPU AMD junto da NVIDIA, o Sussurro a identifica e explica seu estado abaixo do seletor, mas não oferece um botão AMD que falharia. O pacote Python normal do CTranslate2 usa CUDA; AMD requer uma compilação ROCm/HIP separada. Os dois backends não se somam para acelerar um único ditado, e manter a AMD livre evita disputar memória compartilhada quando ela é integrada ao processador.
 
@@ -177,7 +177,17 @@ Quem usava Automático, Tiny, Base, Small, Medium ou Parakeet passa para o **Tur
 
 ## Reuniões (Linux)
 
-A aba **REUNIÃO** grava o seu microfone e o que o PC toca em duas trilhas separadas, e ao parar transcreve com quem falou o quê. Funciona com qualquer app de chamada, porque só escuta o áudio do sistema: nenhum bot entra na call e nada sai da máquina. Portado do [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) de Jankees van Woezik (MIT), trocando o whisper.cpp na CPU pelo modelo do ditado na GPU.
+A aba **REUNIÃO** grava o seu microfone e o que o PC toca em duas trilhas separadas, e ao parar transcreve com quem falou o quê. Funciona com qualquer app de chamada, porque só escuta o áudio do sistema: nenhum bot entra na call. Portado do [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) de Jankees van Woezik (MIT), trocando o whisper.cpp na CPU pelo modelo do ditado na GPU.
+
+O combo **MOTOR**, ao lado de Importar áudio, escolhe quem transcreve e separa as vozes:
+
+| Motor | Onde roda | Quando usar |
+| --- | --- | --- |
+| **Local · modelo do ditado** | modelo do ditado + Nemotron na GPU | padrão: nada sai da máquina |
+| **Grok (xAI) · nuvem** | xAI transcreve e separa as vozes | notebook sem GPU NVIDIA |
+| **ElevenLabs Scribe · nuvem** | ElevenLabs transcreve e separa as vozes | idem; aceita o número fixo de falantes |
+
+Na nuvem, cada lado sobe uma vez, em Opus a 32 kbit/s e só com os trechos de fala (silêncio e eco ficam de fora), e os dois lados vão em paralelo. O Nemotron não é carregado e o ditado continua livre durante a transcrição. Uma reunião real de 9 min saiu em 10 s pelo Grok e 14 s pela ElevenLabs num notebook sem GPU dedicada; o arquivo misturado de 9 min, com as duas vozes separadas pelo provedor, em 35 s e 17 s. Se o provedor escolhido falhar, a reunião vai pro outro, se houver credencial dele. As credenciais são as mesmas do ditado na nuvem.
 
 A bolinha mostra **REUNIAO** em azul com o tempo gravado, mesmo fora da aba. Pausada, fica cinza e o relógio para. Durante um ditado a bolinha prioriza o ditado e volta à reunião quando ele termina. O indicador da reunião não tem X nem confirmar, para não parar uma call por engano.
 
@@ -185,13 +195,15 @@ A bolinha mostra **REUNIAO** em azul com o tempo gravado, mesmo fora da aba. Pau
 
 - **Antes de começar**, os dois medidores já mostram o microfone e o áudio do PC. Nome e idioma podem mudar durante a call; **Pausar** congela as duas trilhas.
 - **Cada lado é transcrito separado**, então duas pessoas falando juntas ou música por baixo não apagam a voz mais baixa, e o lado de cada frase é a própria trilha (Você / Remoto). Sem fone, a voz dos outros vaza no seu microfone; o eco é reconhecido e fica de fora.
-- **Várias vozes no mesmo lado** (um colega do seu lado, três pessoas do outro) são separadas pelo [Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) da NVIDIA na GPU: Remoto 1, Remoto 2 e assim por diante. Cada falante ganha um campo de nome e uma cor.
+- **Várias vozes no mesmo lado** (um colega do seu lado, três pessoas do outro) são separadas pelo [Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) da NVIDIA na GPU, ou pelo provedor com MOTOR de nuvem: Remoto 1, Remoto 2 e assim por diante. Cada falante ganha um campo de nome e uma cor.
 - **Importar áudio** transcreve um arquivo qualquer que o ffmpeg lê (memo do celular, call gravada em outro lugar), separando as vozes; o número de falantes pode ser fixado.
 - **Na tela da reunião**: clique numa linha para ouvir dali, renomeie falantes, copie a transcrição em Markdown, abra a pasta ou transcreva de novo em outro idioma. A Biblioteca vale aqui também.
 - **Se o app cair gravando**, as trilhas já estão no cache e a aba oferece salvar ou descartar na próxima abertura.
 - **Atalhos**: `python app.py meeting-start`, `meeting-stop` e `meeting-pause` controlam a gravação sem abrir a janela.
 
-Cada reunião vira uma pasta em `~/Documentos/Reuniões` (a pasta de documentos do `xdg-user-dir`), com o prefixo de data para ordenar: `audio.ogg` (os dois lados nivelados), `transcricao.md`, `reuniao.json` (falas, nomes e modelo) e `.trilhas/` com cada lado separado, que é o que "Refazer" usa. Requer `parec`/`pacat` (libpulse) e `ffmpeg` com Opus. O modelo de vozes (~200 MB) baixa no primeiro uso.
+Cada reunião vira uma pasta em `~/Documentos/Reuniões` (a pasta de documentos do `xdg-user-dir`), com o prefixo de data para ordenar: `audio.ogg` (os dois lados nivelados), `transcricao.md`, `reuniao.json` (falas, nomes e modelo) e `.trilhas/` com cada lado separado, que é o que "Refazer" usa. Requer `parec`/`pacat` (libpulse) e `ffmpeg` com Opus. O modelo de vozes (~200 MB) baixa no primeiro uso do motor Local.
+
+Pela linha de comando, `sussurro_meeting.py transcribe mic.ogg pc.ogg --model cloud-xai` (ou `cloud-elevenlabs`, e `transcribe-file audio.ogg --speakers 2`) roda o mesmo caminho de nuvem.
 
 No bench do Meeting Recorder (os casos de teste dele com gabarito, rodado com `sussurro_meeting.py`), com Turbo na GPU: 97,2% das palavras com a pessoa certa na call (o app original: 94,1%), 93,5% no arquivo importado (90,7%) e 99,4% numa reunião real do corpus AMI (97,6%), em 2 a 6 s por caso contra 20 a 160 s do original na CPU.
 
@@ -223,7 +235,7 @@ Em Wayland, a injeção usa `wtype`; configure o atalho do compositor para execu
 - `library.json` — sua biblioteca de correções de palavras. Também fica de fora do git.
 - `sussurro.log` — log escrito quando rodando sob `pythonw`.
 
-Todos estão no `.gitignore`. Com modelo local, nada é enviado para serviço externo: captura, VAD, modelo e injeção de texto são 100% locais. Com ElevenLabs Scribe ou Grok, o áudio de cada trecho do ditado vai para o provedor escolhido (ou pro local, se ele falhar), assim como o do **Refazer** e o do `sussurro transcribe`, que usam o modelo atual. Reuniões, histórico, biblioteca e configurações nunca saem do PC.
+Todos estão no `.gitignore`. Com modelo local, nada é enviado para serviço externo: captura, VAD, modelo e injeção de texto são 100% locais. Com ElevenLabs Scribe ou Grok, o áudio de cada trecho do ditado vai para o provedor escolhido (ou pro local, se ele falhar), assim como o do **Refazer** e o do `sussurro transcribe`, que usam o modelo atual. O áudio de reunião só sai do PC com um MOTOR de nuvem escolhido na aba REUNIÃO. Pastas de reunião, histórico, biblioteca e configurações nunca saem do PC.
 
 ## Linux — o que ainda é limitado
 

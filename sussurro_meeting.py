@@ -10,6 +10,10 @@ vozes no mesmo lado sao separadas pelo Nemotron (sussurro_diarize).
 Diferenca daqui: o faster-whisper roda na GPU sobre a trilha com o que nao e fala
 zerado; o Silero pula os silencios e devolve os tempos ja na linha do tempo real,
 sem a colagem de trechos que o original faz para o whisper.cpp.
+
+Na nuvem (Grok ou ElevenLabs, para maquina sem GPU) cada lado vai num pedido so, com
+os trechos com som colados (o provedor cobra por segundo), e o proprio provedor diz
+quem fala cada palavra: o Nemotron nao roda.
 """
 import bisect
 import json
@@ -17,6 +21,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,6 +31,7 @@ FRAME = RATE * 30 // 1000  # 30 ms
 PARAGRAPH_PAUSE_MS = 3000  # pausa maior abre paragrafo, mesmo falante
 PARAGRAPH_MAX_MS = 90_000  # turno longo e quebrado: a linha continua util pra pular
 NEW_STRETCH_MS = 1400      # silencio que separa dois trechos de som (padding + juncao)
+CLOUD_GAP_S = 0.6          # pausa entre os trechos colados que vao pra nuvem
 
 LANGUAGES = {"pt": "Português", "en": "Inglês", "auto": "Automático", "es": "Espanhol",
              "fr": "Francês", "de": "Alemão", "it": "Italiano", "nl": "Holandês"}
@@ -271,6 +277,64 @@ def recognize(model, audio, language, progress=None, abort=None, hotwords=None):
     return words, (detected if detected and detected != "auto" else None)
 
 
+def is_cloud_model(model):
+    """CloudModel separa as vozes sozinho (Mock e modelo local nao)."""
+    return getattr(model, "supports_diarization", False) is True
+
+
+def compact(track, regions, gap=CLOUD_GAP_S):
+    """So os trechos com som, com uma pausa curta entre eles. Volta o audio e o mapa
+    (inicio no audio colado, inicio real, tamanho), em amostras."""
+    pause = np.zeros(int(RATE * gap), dtype=np.float32)
+    pieces, spans, at = [], [], 0
+    for r in regions:
+        if pieces:
+            pieces.append(pause)
+            at += pause.size
+        part = np.asarray(track[r.start:r.end], dtype=np.float32)
+        spans.append((at, r.start, part.size))
+        pieces.append(part)
+        at += part.size
+    return (np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)), spans
+
+
+def real_ms(spans, seconds):
+    """Tempo no audio colado -> ms na gravacao. Palavra na pausa gruda no trecho anterior."""
+    if not spans:
+        return int(seconds * 1000)
+    sample = int(round(seconds * RATE))
+    i = max(bisect.bisect_right([s[0] for s in spans], sample) - 1, 0)
+    packed, real, size = spans[i]
+    return (real + min(max(sample - packed, 0), size)) * 1000 // RATE
+
+
+def recognize_cloud(model, track, regions, language, *, diarize, speakers=None, abort=None, hotwords=None):
+    """Um pedido pro lado inteiro, em Opus, com o provedor marcando o falante de cada
+    palavra. Volta palavras e turnos na linha do tempo real e o idioma ('pt', 'en'...).
+    O pedido em voo nao para no Cancelar: o cancelamento vale assim que ele volta."""
+    import sussurro_cloud as cloud
+    import sussurro_diarize as voices
+    _check(abort)
+    audio, spans = compact(track, regions)
+    if not spans:
+        return [], None, []
+    segments, info = model.transcribe(audio, language=None if language == "auto" else language,
+                                      word_timestamps=True, hotwords=hotwords, diarize=diarize,
+                                      speakers=speakers, compress=True)
+    _check(abort)
+    words, labelled = [], []
+    for index, seg in enumerate(segments):
+        for w in seg.words or []:
+            text = w.word.strip()
+            if not text:
+                continue
+            start, end = real_ms(spans, w.start), real_ms(spans, max(w.end, w.start))
+            words.append(Word(text, start, end, float(getattr(seg, "no_speech_prob", 0.0)), index))
+            labelled.append((start, end, getattr(w, "speaker", None)))
+    turns = voices.turns_from_labels(labelled, speakers) if diarize else []
+    return words, cloud.short_language(getattr(info, "language", None)), turns
+
+
 # ---------------------------------------------------------------------------
 # Linhas
 
@@ -510,7 +574,8 @@ def _open_diarizer(progress):
 def transcribe_meeting(mic, computer, language, model, *, labels=Labels(), find_voices=True,
                        report=None, abort=None, lock=None, hotwords=None):
     """Transcreve uma reuniao gravada (duas trilhas 16 kHz). `lock` e o lock do modelo
-    compartilhado com o ditado: so o whisper roda com ele tomado."""
+    compartilhado com o ditado: so o whisper roda com ele tomado. Modelo de nuvem manda
+    os dois lados ao mesmo tempo e separa as vozes pelo provedor."""
     progress = Progress(report)
     mic, computer = np.asarray(mic, np.float32), np.asarray(computer, np.float32)
     duration = max(mic.size, computer.size) // RATE
@@ -521,6 +586,10 @@ def transcribe_meeting(mic, computer, language, model, *, labels=Labels(), find_
     computer_regions = speech_regions([computer], computer.size)
     if not mic_regions and not computer_regions:
         return Transcript([], language if language != "auto" else "unknown", duration)
+
+    if is_cloud_model(model):
+        return _meeting_in_cloud(model, mic, computer, mic_regions, computer_regions, language, labels,
+                                 find_voices, progress, abort, hotwords, duration)
 
     local, remote = [], []
     if find_voices:
@@ -559,10 +628,35 @@ def transcribe_meeting(mic, computer, language, model, *, labels=Labels(), find_
                       duration)
 
 
+def _meeting_in_cloud(model, mic, computer, mic_regions, computer_regions, language, labels, find_voices,
+                      progress, abort, hotwords, duration):
+    sides = [(mic, mic_regions, labels.you), (computer, computer_regions, labels.remote)]
+    sides = [side for side in sides if side[1]]
+    sides.sort(key=lambda side: -sum(r.end - r.start for r in side[1]))  # idioma do lado com mais som
+    progress.stage("Transcrevendo os dois lados na nuvem" + (" e separando as vozes..." if find_voices else "..."))
+    progress.fraction(0.05)
+    with ThreadPoolExecutor(max_workers=len(sides)) as pool:
+        jobs = [pool.submit(recognize_cloud, model, track, regions, language, diarize=find_voices,
+                            abort=abort, hotwords=hotwords) for track, regions, _ in sides]
+        results = [job.result() for job in jobs]
+    lines, detected = [], None
+    for (track, regions, label), (words, found, turns) in zip(sides, results):
+        detected = detected or found
+        speakers = Speakers(label, turns if any(t.speaker > 0 for t in turns) else [])
+        side_lines = phrases(words, regions, speakers, track, paragraphs=False)
+        for line in side_lines:
+            progress.line(f"{line.speaker}: {line.text}")
+        lines.extend(side_lines)
+    progress.fraction(1.0)
+    return Transcript(interleave(lines, labels), language if language != "auto" else (detected or "unknown"),
+                      duration)
+
+
 def transcribe_single(track, language, speakers, model, *, labels=Labels(), report=None,
                       abort=None, lock=None, hotwords=None):
     """Um arquivo so (importado): as vozes sao separadas pelo Nemotron. `speakers` fixa
-    quantas pessoas falam; None deixa o modelo decidir, 1 pula a separacao."""
+    quantas pessoas falam; None deixa o modelo decidir, 1 pula a separacao. Na nuvem
+    quem separa e o provedor."""
     import sussurro_diarize as diarize
     progress = Progress(report)
     track = np.asarray(track, np.float32)
@@ -573,6 +667,17 @@ def transcribe_single(track, language, speakers, model, *, labels=Labels(), repo
     regions = speech_regions([track], track.size)
     if not regions:
         return Transcript([], language if language != "auto" else "unknown", duration)
+    if is_cloud_model(model):
+        progress.stage("Transcrevendo na nuvem" + (" e separando as vozes..." if speakers != 1 else "..."))
+        progress.fraction(0.05)
+        words, found, turns = recognize_cloud(model, levelled, regions, language, diarize=speakers != 1,
+                                              speakers=speakers, abort=abort, hotwords=hotwords)
+        who = Speakers(labels.speaker, turns or diarize.single(track), side=False)
+        lines = phrases(words, regions, who, levelled, paragraphs=True)
+        for line in lines:
+            progress.line(f"{line.speaker}: {line.text}")
+        progress.fraction(1.0)
+        return Transcript(lines, language if language != "auto" else (found or "unknown"), duration)
     if speakers == 1:
         turns = diarize.single(track)
     else:

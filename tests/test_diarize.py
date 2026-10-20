@@ -240,6 +240,20 @@ class ModelFileTests(unittest.TestCase):
 
 
 class TurnTests(unittest.TestCase):
+    def test_labels_from_cloud_join_and_renumber_in_order_heard(self):
+        labelled = [(5000, 5400, 'b'), (5450, 9000, 'b'), (0, 4800, 'a'), (9500, 15000, 'a'), (100, 200, None)]
+        self.assertEqual(diarize.turns_from_labels(labelled),
+                         [Turn(0, 4800, 0), Turn(5000, 9000, 1), Turn(9500, 15000, 0)])
+
+    def test_labels_with_a_brief_voice_go_to_the_neighbour(self):
+        labelled = [(0, 30000, 0), (30100, 31000, 7), (31500, 60000, 0)]
+        self.assertEqual({t.speaker for t in diarize.turns_from_labels(labelled)}, {0})
+
+    def test_labels_respect_fixed_speaker_count(self):
+        labelled = [(0, 10000, 0), (10500, 20000, 1), (20500, 26000, 2)]
+        self.assertEqual({t.speaker for t in diarize.turns_from_labels(labelled, speakers=2)}, {0, 1})
+        self.assertEqual(diarize.turns_from_labels([(0, 100, None)]), [])
+
     def test_speakers_are_numbered_by_first_appearance(self):
         turns = diarize._renumber([(5000, 6000, 3), (0, 1000, 7), (2000, 3000, 3), (7000, 8000, 7)])
         self.assertEqual([t.speaker for t in turns], [0, 1, 1, 0])

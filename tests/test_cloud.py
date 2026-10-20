@@ -175,6 +175,79 @@ class HelperTests(unittest.TestCase):
         self.assertEqual([(s.start, s.end, s.text) for s in segments], [(0.0, 3.0, ' Texto solto')])
         self.assertEqual(cloud.segments_from_words([], '  ', 3.0), [])
 
+    def test_short_language_from_either_provider(self):
+        self.assertEqual([cloud.short_language(c) for c in ('por', 'eng', 'pt-BR', 'es-mx', 'auto', None, 'ja')],
+                         ['pt', 'en', 'pt', 'es', None, None, 'ja'])
+
+    def test_speaker_change_starts_a_new_segment(self):
+        items = [('Oi', 0.0, 0.3, True, 0), (' ', 0.3, 0.3, False), ('tudo', 0.3, 0.6, True, 0),
+                 (' ', 0.6, 0.6, False), ('Bem', 0.7, 1.0, True, 1)]
+        segments = cloud.segments_from_words(items, '', 1.0)
+        self.assertEqual([s.text for s in segments], [' Oi tudo', ' Bem'])
+        self.assertEqual([w.speaker for w in segments[1].words], [1])
+
+
+class MeetingRequestTests(unittest.TestCase):
+    """Reuniao: falante por palavra, Opus no lugar de PCM e prazo longo."""
+
+    def setUp(self):
+        self.http = Mock()
+        self.audio = np.zeros(cloud.SAMPLE_RATE * 4, dtype=np.float32)
+
+    def model(self, provider):
+        return CloudModel(provider, http=self.http, secrets=Secrets(), fallback=False)
+
+    def test_xai_diarize_reads_speaker_per_word_and_sends_ogg(self):
+        body = {'language': 'pt', 'text': 'Oi. Tudo bem?', 'words': [
+            {'text': 'Oi.', 'start': 0.1, 'end': 0.3, 'speaker': 0},
+            {'text': 'Tudo', 'start': 0.4, 'end': 0.6, 'speaker': 1},
+            {'text': 'bem?', 'start': 0.6, 'end': 0.9, 'speaker': 1}]}
+        self.http.post.return_value = Response(body=body)
+        with patch.object(cloud, 'opus_bytes', return_value=b'OggS-falso'):
+            segments, _ = self.model(XAI).transcribe(self.audio, language='pt', diarize=True, compress=True)
+        kwargs = self.http.post.call_args.kwargs
+        self.assertEqual(kwargs['data']['diarize'], 'true')
+        self.assertEqual(kwargs['files']['file'], ('reuniao.ogg', b'OggS-falso', 'audio/ogg'))
+        self.assertGreaterEqual(kwargs['timeout'].read, 60)
+        self.assertEqual([(s.text, [w.speaker for w in s.words]) for s in segments],
+                         [(' Oi.', [0]), (' Tudo bem?', [1, 1])])
+
+    def test_elevenlabs_diarize_with_fixed_count_and_no_pcm_format(self):
+        body = {'language_code': 'por', 'text': 'Oi. Bem.', 'words': [
+            {'text': 'Oi.', 'start': 0.1, 'end': 0.3, 'type': 'word', 'speaker_id': 'speaker_0'},
+            {'text': ' ', 'start': 0.3, 'end': 0.4, 'type': 'spacing', 'speaker_id': 'speaker_0'},
+            {'text': 'Bem.', 'start': 0.4, 'end': 0.7, 'type': 'word', 'speaker_id': 'speaker_1'}]}
+        self.http.post.return_value = Response(body=body)
+        with patch.object(cloud, 'opus_bytes', return_value=b'OggS-falso'):
+            segments, _ = self.model(ELEVENLABS).transcribe(self.audio, language='pt', diarize=True,
+                                                            speakers=2, compress=True)
+        data = self.http.post.call_args.kwargs['data']
+        self.assertEqual((data['diarize'], data['num_speakers']), ('true', '2'))
+        self.assertNotIn('file_format', data)  # Opus tem cabecalho; pcm_s16le_16 quebraria
+        self.assertEqual([w.speaker for s in segments for w in s.words], ['speaker_0', 'speaker_1'])
+
+    def test_without_ffmpeg_meeting_falls_back_to_raw_audio(self):
+        self.http.post.return_value = Response(body=XAI_BODY)
+        with patch.object(cloud, 'opus_bytes', return_value=None):
+            self.model(XAI).transcribe(self.audio, language='pt', compress=True)
+        self.assertTrue(self.http.post.call_args.kwargs['files']['file'][1].startswith(b'RIFF'))
+
+    def test_dictation_does_not_ask_for_speakers(self):
+        self.http.post.return_value = Response(body=XAI_BODY)
+        self.model(XAI).transcribe(self.audio, language=None)
+        data = self.http.post.call_args.kwargs['data']
+        self.assertNotIn('diarize', data)
+        self.assertNotIn('format', data)  # format=true sem idioma: a xAI responde 400
+
+    def test_opus_bytes_is_a_real_ogg(self):
+        import shutil
+        if not shutil.which('ffmpeg'):
+            self.skipTest('sem ffmpeg')
+        t = np.arange(cloud.SAMPLE_RATE * 2) / cloud.SAMPLE_RATE
+        packed = cloud.opus_bytes((0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32))
+        self.assertTrue(packed.startswith(b'OggS'))
+        self.assertLess(len(packed), cloud.SAMPLE_RATE * 2 * 2 // 4)  # bem menor que o PCM16
+
 
 class CredentialTests(unittest.TestCase):
     def setUp(self):

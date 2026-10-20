@@ -416,6 +416,25 @@ def single(samples):
     return [Turn(0, len(samples) * 1000 // RATE, 0)]
 
 
+def turns_from_labels(labelled, speakers=None, join_ms=500):
+    """Turnos a partir de (inicio_ms, fim_ms, falante) de outra fonte (a nuvem marca o
+    falante de cada palavra): emenda o mesmo falante com pausa < `join_ms` e limpa como
+    o Nemotron (`speakers` fixa quantos; sem isso, voz de poucos segundos vai pro vizinho)."""
+    raw = []
+    for start, end, who in sorted(labelled, key=lambda item: item[0]):
+        if who is None:
+            continue
+        if raw and raw[-1][2] == who and start - raw[-1][1] < join_ms:
+            raw[-1][1] = max(raw[-1][1], int(end))
+        else:
+            raw.append([int(start), max(int(end), int(start) + 1), who])
+    raw = [tuple(turn) for turn in raw]
+    if not raw:
+        return []
+    raw = _keep_largest(raw, speakers) if speakers is not None else _absorb_small_clusters(raw)
+    return _renumber(raw)
+
+
 def speaker_at(turns, start_ms, end_ms):
     """Speaker overlapping start_ms:end_ms the most, or of the nearest turn (words in a gap)."""
     end_ms = max(end_ms, start_ms + 1)

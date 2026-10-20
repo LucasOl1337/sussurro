@@ -86,8 +86,9 @@ from faster_whisper.utils import download_model
 from sussurro_audio import pipewire_inputs, prepare_input_devices
 from sussurro_hardware import (detect_hardware, execution_device_labels,
                                execution_hardware_note)
-from sussurro_models import (LOCAL_DEFAULT, MODEL_LABELS, DEFAULT_MODEL_SETTINGS, engine_label, fallback_config,
-                             normalize_model_settings, resolve_model_config, model_path)
+from sussurro_models import (LOCAL_DEFAULT, MEETING_LOCAL, MODEL_LABELS, DEFAULT_MODEL_SETTINGS, engine_label,
+                             fallback_config, normalize_meeting_engine, normalize_model_settings,
+                             resolve_model_config, model_path)
 from sussurro_cloud import ELEVENLABS, PROVIDER_NAMES, XAI, CloudError, CloudModel, is_cloud, require_credentials
 from sussurro_usage import fmt_credits, fmt_minutes, fmt_usd, shared_ledger, spend_line
 import sussurro_sounds
@@ -204,6 +205,7 @@ DEFAULT_SETTINGS = {
     "inject_method": "colar",   # colar (clipboard + atalho do app focado) | digitar
     "dot_pos": [0.5, 0.94],     # posicao da bolinha, fracao da area util do monitor
     "feedback_sounds": False,
+    "meeting_engine": MEETING_LOCAL,  # local | cloud-xai | cloud-elevenlabs (aba REUNIAO)
     "devices": dict(devmod.DEFAULTS),  # gestos de dispositivos (aba OMARCHY, so Linux)
 }
 
@@ -222,6 +224,7 @@ def load_settings() -> dict:
     if SETTINGS_PATH.exists():
         settings.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
     settings.update(normalize_model_settings(settings))
+    settings["meeting_engine"] = normalize_meeting_engine(settings.get("meeting_engine"))
     settings["devices"] = {**devmod.DEFAULTS, **(settings.get("devices") or {})}
     return settings
 
@@ -1099,9 +1102,15 @@ class Transcriber:
                 finally:
                     self._model_lock.release()
 
-    def meeting_model(self):
-        """Reuniao roda sempre local (horas de audio, palavras com tempo e idioma por trecho):
-        com modelo de nuvem no ditado, empresta o Turbo. Chamar com o job de reuniao aberto."""
+    def meeting_model(self, engine=MEETING_LOCAL):
+        """Motor da reuniao. `MEETING_LOCAL`: o modelo do ditado, ou o Turbo emprestado se o
+        ditado for de nuvem. Grok/ElevenLabs: um CloudModel proprio, fora do _model_lock
+        (o provedor separa as vozes e o ditado segue livre); o chamador fecha com close().
+        Chamar com o job de reuniao aberto."""
+        if is_cloud(engine):
+            model = CloudModel(engine)
+            model.check()  # sem credencial: erro claro antes de subir audio
+            return model, resolve_model_config({"whisper_model": engine})
         with self._model_lock:
             if self._is_cloud_locked():
                 return self._borrow_local_locked(), self._local_config
@@ -1425,10 +1434,13 @@ class Transcriber:
                 raise RuntimeError("Aguarde o ditado, arquivo, reuniao ou carregamento atual terminar.")
             self.comparing.set()
 
-    def begin_meeting_job(self):
+    def begin_meeting_job(self, cloud=False):
         """A reuniao usa o modelo do ditado (sob o _model_lock so no whisper); a troca de
-        modelo e a comparacao esperam, o ditado segue entre um lado e outro."""
+        modelo e a comparacao esperam, o ditado segue entre um lado e outro. Reuniao na
+        nuvem (`cloud`) nao toca no modelo do ditado e nao espera ele."""
         with self._pending_lock:
+            if cloud:
+                return  # modelo proprio: nao segura troca de modelo, comparacao nem historico
             if self.model is None or self.model_loading.is_set():
                 raise RuntimeError("O modelo ainda esta carregando.")
             if self.comparing.is_set():
@@ -1437,7 +1449,9 @@ class Transcriber:
                 raise RuntimeError("Aguarde a transcricao do historico terminar.")
             self._meeting_jobs += 1
 
-    def end_meeting_job(self):
+    def end_meeting_job(self, cloud=False):
+        if cloud:
+            return
         with self._pending_lock:
             self._meeting_jobs -= 1
 
