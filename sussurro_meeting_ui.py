@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog
 
@@ -41,6 +41,8 @@ ABOUT = {
              'só os trechos com som de cada lado vão para {name}, que transcreve e separa as vozes; o áudio e a '
              'transcrição ficam no PC.',
 }
+SIDE_W = 190                 # coluna da lista de reunioes
+TITLE_CHARS = 24             # titulo maior que isso vira reticencias na lista
 
 
 def _select_on_focus(entry):
@@ -69,6 +71,10 @@ class MeetingPanel(ctk.CTkFrame):
         self.closed = False
         self.job_engine = 'local'    # motor do trabalho em curso (fixo do inicio ao fim)
 
+        self.side = self._build_side()
+        self.side.pack(side='left', fill='y', padx=(12, 0), pady=12)
+        self.main = ctk.CTkFrame(self, fg_color='transparent')
+        self.main.pack(side='left', fill='both', expand=True)
         self.ready_view = self._build_ready()
         self.work_view = self._build_work()
         self.done_view = self._build_done()
@@ -102,14 +108,28 @@ class MeetingPanel(ctk.CTkFrame):
         return ctk.CTkLabel(master, text=text, text_color=MUTED, anchor='w',
                             font=(self.host.FONT_UI, 10, 'bold'))
 
+    def _build_side(self):
+        side = ctk.CTkFrame(self, fg_color=BG, corner_radius=10, width=SIDE_W)
+        side.pack_propagate(False)
+        self.side_caption = self._caption(side, 'REUNIÕES')
+        self.side_caption.pack(fill='x', padx=12, pady=(10, 6))
+        self.new_btn = self._button(side, '+ Nova reunião', self._new)
+        self.new_btn.pack(fill='x', padx=8)
+        self.side_note = ctk.CTkLabel(side, text='', text_color=MUTED, font=(self.host.FONT_UI, 10),
+                                      anchor='w', justify='left', wraplength=SIDE_W - 24)
+        self.side_note.pack(side='bottom', fill='x', padx=12, pady=(0, 8))
+        self.list_frame = ctk.CTkScrollableFrame(side, fg_color='transparent', corner_radius=0)
+        self.list_frame.pack(fill='both', expand=True, padx=(2, 0), pady=(8, 4))
+        self.rows = []  # (pasta, frame da linha)
+        return side
+
     def _build_ready(self):
-        view = ctk.CTkFrame(self, fg_color='transparent')
+        view = ctk.CTkFrame(self.main, fg_color='transparent')
         top = ctk.CTkFrame(view, fg_color='transparent')
         top.pack(fill='x', padx=16, pady=(12, 0))
         top.grid_columnconfigure(0, weight=1)
         self._caption(top, 'NOME DA REUNIÃO').grid(row=0, column=0, sticky='w')
         self._caption(top, 'IDIOMA').grid(row=0, column=1, sticky='w', padx=(8, 0))
-        self._caption(top, 'ABRIR ANTERIOR').grid(row=0, column=2, sticky='w', padx=(8, 0))
         # sem textvariable: com ela o CTkEntry nao mostra o placeholder
         self.title_entry = ctk.CTkEntry(top, height=32, font=self.font, fg_color=FIELD,
                                         border_color=FIELD_HOVER, text_color=INK,
@@ -118,8 +138,6 @@ class MeetingPanel(ctk.CTkFrame):
         lang = self.host.settings.get('language', 'pt')
         self.language = self._combo(top, LANG_CHOICES, lang if lang in LANG_CHOICES else 'pt', 80)
         self.language.grid(row=1, column=1, padx=(8, 0), pady=(4, 0))
-        self.previous = self._combo(top, ['—'], '—', 220, command=self._open_previous)
-        self.previous.grid(row=1, column=2, padx=(8, 0), pady=(4, 0))
 
         self.recovery = ctk.CTkFrame(view, fg_color=FIELD, corner_radius=8)
         self.recovery_label = ctk.CTkLabel(self.recovery, text='', text_color=INK, font=self.font,
@@ -144,7 +162,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.clock = ctk.CTkLabel(clock, text='00:00', text_color=INK, font=(self.host.FONT_DISPLAY, 30))
         self.clock.pack(side='left')
         self.state_label = ctk.CTkLabel(clock, text='', text_color=MUTED, font=self.font, anchor='w',
-                                        justify='left', wraplength=460)
+                                        justify='left', wraplength=340)
         self.state_label.pack(side='left', padx=14)
 
         buttons = ctk.CTkFrame(view, fg_color='transparent')
@@ -154,9 +172,9 @@ class MeetingPanel(ctk.CTkFrame):
         self.pause_btn = self._button(buttons, 'Pausar', self.pause, width=100)
         self.stop_btn = self._button(buttons, 'Parar e transcrever', self.stop, width=170)
         self.voices = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(buttons, text='Separar vozes do mesmo lado', variable=self.voices,
+        ctk.CTkCheckBox(view, text='Separar vozes do mesmo lado', variable=self.voices,
                         font=self.font, fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                        text_color=INK_2).pack(side='right')
+                        text_color=INK_2).pack(anchor='w', padx=16, pady=(10, 0))
 
         imports = ctk.CTkFrame(view, fg_color='transparent')
         imports.pack(fill='x', padx=16, pady=(16, 0))
@@ -165,18 +183,20 @@ class MeetingPanel(ctk.CTkFrame):
         ctk.CTkLabel(imports, text='Falantes:', text_color=MUTED, font=self.font).pack(side='left', padx=(12, 6))
         self.speakers = self._combo(imports, SPEAKER_CHOICES, 'Automático', 120)
         self.speakers.pack(side='left')
+        engine_row = ctk.CTkFrame(view, fg_color='transparent')
+        engine_row.pack(fill='x', padx=16, pady=(10, 0))
+        ctk.CTkLabel(engine_row, text='MOTOR', text_color=MUTED, font=(self.host.FONT_UI, 10, 'bold')).pack(
+            side='left', padx=(0, 6))
         engine = normalize_meeting_engine(self.host.settings.get('meeting_engine'))
-        self.engine = self._combo(imports, list(ENGINE_VALUES), MEETING_ENGINES[engine], 230,
+        self.engine = self._combo(engine_row, list(ENGINE_VALUES), MEETING_ENGINES[engine], 230,
                                   command=self._on_engine)
-        self.engine.pack(side='right')
-        ctk.CTkLabel(imports, text='MOTOR', text_color=MUTED, font=(self.host.FONT_UI, 10, 'bold')).pack(
-            side='right', padx=(12, 6))
+        self.engine.pack(side='left')
         self.about = ctk.CTkLabel(view, text='', text_color=MUTED, font=(self.host.FONT_UI, 11), anchor='w',
-                                  justify='left', wraplength=680)
+                                  justify='left', wraplength=470)
         self.about.pack(fill='x', padx=16, pady=(16, 0))
         self._describe_engine(engine)
         self.ready_status = ctk.CTkLabel(view, text='', text_color=INK_2, font=self.font, anchor='w',
-                                         justify='left', wraplength=680)
+                                         justify='left', wraplength=470)
         self.ready_status.pack(fill='x', padx=16, pady=(8, 0))
         return view
 
@@ -196,7 +216,7 @@ class MeetingPanel(ctk.CTkFrame):
         self._describe_engine(engine)
 
     def _build_work(self):
-        view = ctk.CTkFrame(self, fg_color='transparent')
+        view = ctk.CTkFrame(self.main, fg_color='transparent')
         self.work_stage = ctk.CTkLabel(view, text='', text_color=INK, font=(self.host.FONT_DISPLAY, 20), anchor='w')
         self.work_stage.pack(fill='x', padx=16, pady=(16, 6))
         self.work_bar = ctk.CTkProgressBar(view, progress_color=ACCENT, fg_color=FIELD, height=10)
@@ -210,7 +230,7 @@ class MeetingPanel(ctk.CTkFrame):
         return view
 
     def _build_done(self):
-        view = ctk.CTkFrame(self, fg_color='transparent')
+        view = ctk.CTkFrame(self.main, fg_color='transparent')
         head = ctk.CTkFrame(view, fg_color='transparent')
         head.pack(fill='x', padx=16, pady=(12, 0))
         head.grid_columnconfigure(0, weight=1)
@@ -221,7 +241,8 @@ class MeetingPanel(ctk.CTkFrame):
         title.bind('<Return>', lambda _e: self._rename())
         title.bind('<FocusOut>', lambda _e: self._rename())
         _select_on_focus(title)
-        self.done_meta = ctk.CTkLabel(head, text='', text_color=MUTED, font=(self.host.FONT_MONO, 11), anchor='w')
+        self.done_meta = ctk.CTkLabel(head, text='', text_color=MUTED, font=(self.host.FONT_MONO, 11), anchor='w',
+                                      justify='left', wraplength=470)
         self.done_meta.grid(row=1, column=0, sticky='ew', pady=(4, 0))
 
         self.names_frame = ctk.CTkFrame(view, fg_color='transparent')
@@ -230,15 +251,14 @@ class MeetingPanel(ctk.CTkFrame):
 
         actions = ctk.CTkFrame(view, fg_color='transparent')
         actions.pack(fill='x', padx=16, pady=(8, 0))
-        self._button(actions, 'Copiar transcrição', self._copy, accent=True, width=160).pack(side='left')
-        self.play_btn = self._button(actions, 'Ouvir', self._toggle_play, width=80)
+        self._button(actions, 'Copiar', self._copy, accent=True, width=90).pack(side='left')
+        self.play_btn = self._button(actions, 'Ouvir', self._toggle_play, width=70)
         self.play_btn.pack(side='left', padx=(8, 0))
         self._button(actions, 'Abrir pasta', self._open_folder, width=100).pack(side='left', padx=(8, 0))
-        self.again_btn = self._button(actions, 'Refazer em', self._again, width=100)
+        self.again_btn = self._button(actions, 'Refazer em', self._again, width=96)
         self.again_btn.pack(side='left', padx=(8, 0))
-        self.again_language = self._combo(actions, LANG_CHOICES, 'pt', 70)
+        self.again_language = self._combo(actions, LANG_CHOICES, 'pt', 66)
         self.again_language.pack(side='left', padx=(4, 0))
-        self._button(actions, 'Nova reunião', self._new, width=120).pack(side='right')
 
         self.transcript = tk.Text(view, bg=BG, fg=INK, insertbackground=INK, relief='flat', wrap='word',
                                   font=(self.host.FONT_UI, 12), padx=12, pady=10, cursor='hand2',
@@ -259,8 +279,7 @@ class MeetingPanel(ctk.CTkFrame):
             if v is not view:
                 v.pack_forget()
         view.pack(fill='both', expand=True)
-        if view is self.ready_view:
-            self._refresh_previous()
+        self._refresh_list()
 
     # -- ciclo da aba --------------------------------------------------------
     def shown(self):
@@ -324,7 +343,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.pause_btn.pack(side='left')
         self.stop_btn.pack(side='left', padx=(8, 0))
         self.import_btn.configure(state='disabled')
-        self.previous.configure(state='disabled')
+        self._refresh_list()
         self._set_ready_text()
         return 'ok\n'
 
@@ -356,7 +375,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.stop_btn.pack_forget()
         self.start_btn.pack(side='left')
         self.import_btn.configure(state='normal')
-        self.previous.configure(state='readonly')
+        self._refresh_list()
         if not self.visible:
             self.hidden()
 
@@ -558,10 +577,10 @@ class MeetingPanel(ctk.CTkFrame):
         names = m.get('names') or {}
         for i, label in enumerate(labels):
             var = tk.StringVar(value=names.get(label, label))
-            entry = ctk.CTkEntry(self.names_frame, textvariable=var, width=130, height=28, font=self.font,
+            entry = ctk.CTkEntry(self.names_frame, textvariable=var, width=112, height=28, font=self.font,
                                  fg_color=FIELD, border_color=SPEAKER_COLORS[i % len(SPEAKER_COLORS)],
                                  text_color=INK)
-            entry.grid(row=i // 5, column=i % 5, padx=(0, 6), pady=(0, 4), sticky='w')
+            entry.grid(row=i // 4, column=i % 4, padx=(0, 6), pady=(0, 4), sticky='w')
             entry.bind('<Return>', lambda _e: self._apply_names())
             entry.bind('<FocusOut>', lambda _e: self._apply_names())
             _select_on_focus(entry)
@@ -609,6 +628,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.folder = rec.rename_meeting(self.folder, title)
         rec.write_manifest(self.folder, self.manifest)
         self._write_markdown(self.folder, self.manifest)
+        self._refresh_list()
 
     def _copy(self):
         text = (self.folder / rec.TRANSCRIPT).read_text(encoding='utf-8')
@@ -640,25 +660,87 @@ class MeetingPanel(ctk.CTkFrame):
                 return
 
     def _new(self):
+        if self.recording or self.abort is not None:
+            return
         self.player.stop()
         self.folder = self.manifest = None
         self.title_entry.delete(0, 'end')
         self._show(self.ready_view)
         self._set_ready_text()
 
-    def _refresh_previous(self):
+    # -- lista de reunioes ---------------------------------------------------
+    def _busy_note(self):
+        if self.recording:
+            return 'Gravando: pare para abrir outra reunião.'
+        if self.abort is not None:
+            return 'Transcrevendo: espere terminar para abrir outra.'
+        return ''
+
+    def _refresh_list(self):
+        """Redesenha a coluna: todas as reunioes, a aberta em destaque."""
         try:
-            meetings = rec.list_meetings()[:30]
+            meetings = rec.list_meetings()
         except OSError:
             meetings = []
-        self._previous = {f'{folder.name[:8]} · {m.get("title", folder.name)}': folder for folder, m in meetings}
-        self.previous.configure(values=list(self._previous) or ['—'])
-        self.previous.set('—')
+        for _folder, row in self.rows:
+            row.destroy()
+        self.rows = []
+        busy = bool(self._busy_note())
+        self.side_caption.configure(text=f'REUNIÕES · {len(meetings)}' if meetings else 'REUNIÕES')
+        self.side_note.configure(text=self._busy_note() or ('' if meetings else 'Nenhuma reunião salva ainda.'))
+        self.new_btn.configure(state='disabled' if busy else 'normal')
+        for folder, manifest in meetings:
+            self.rows.append((folder, self._list_row(folder, manifest, busy)))
 
-    def _open_previous(self, choice):
-        folder = getattr(self, '_previous', {}).get(choice)
-        if folder is not None and not self.recording:
+    def _list_row(self, folder, manifest, busy):
+        current = self.folder is not None and folder == self.folder
+        base = FIELD_HOVER if current else 'transparent'
+        row = ctk.CTkFrame(self.list_frame, fg_color=base, corner_radius=8)
+        row.pack(fill='x', pady=(0, 2))
+        title = manifest.get('title') or folder.name
+        if len(title) > TITLE_CHARS:
+            title = title[:TITLE_CHARS - 1].rstrip() + '…'
+        name = ctk.CTkLabel(row, text=title, text_color=INK if current or not busy else MUTED, anchor='w',
+                            font=(self.host.FONT_UI, 12, 'bold' if current else 'normal'))
+        name.pack(fill='x', padx=10, pady=(6, 0))
+        meta = ctk.CTkLabel(row, text=self._when(manifest), text_color=MUTED, anchor='w',
+                            font=(self.host.FONT_MONO, 10))
+        meta.pack(fill='x', padx=10, pady=(0, 6))
+        widgets = (row, name, meta)
+        if not busy and not current:
+            def hover(color):
+                return lambda _e: row.configure(fg_color=color)
+            for widget in widgets:
+                widget.bind('<Enter>', hover(FIELD))
+                widget.bind('<Leave>', hover(base))
+                widget.configure(cursor='hand2')
+        for widget in widgets:
+            widget.bind('<Button-1>', lambda _e, f=folder: self._open_from_list(f))
+        return row
+
+    @staticmethod
+    def _when(manifest):
+        try:
+            started = datetime.fromisoformat(manifest['started_at'])
+        except (KeyError, TypeError, ValueError):
+            return ''
+        today = datetime.now().date()
+        if started.date() == today:
+            day = 'hoje'
+        elif started.date() == today - timedelta(days=1):
+            day = 'ontem'
+        else:
+            day = f'{started:%d/%m}'
+        duration = manifest.get('duration_secs') or 0
+        return f'{day} {started:%H:%M}' + (f' · {meeting.clock(duration * 1000)}' if duration else '')
+
+    def _open_from_list(self, folder):
+        if self._busy_note() or folder == self.folder:
+            return
+        try:
             self.open_meeting(folder)
+        except (OSError, ValueError, KeyError) as error:
+            self.side_note.configure(text=f'Não abriu: {error}')
 
     # -- laco da interface ---------------------------------------------------
     def _set_ready_text(self, message=None):

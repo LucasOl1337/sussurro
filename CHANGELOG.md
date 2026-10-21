@@ -4,6 +4,9 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Lista de reuniões na aba REUNIÃO:** uma coluna à esquerda mostra todas as reuniões salvas (título, dia e duração), com a aberta em destaque; um clique troca de reunião e **+ Nova reunião** volta pra gravação. Antes só havia o combo ABRIR ANTERIOR na tela inicial e, com uma transcrição aberta, não dava pra ir pra outra. Durante gravação ou transcrição a lista fica só pra ver.
+- **Reuniões antigas não somem mais:** sem a pasta Documentos configurada, o `xdg-user-dir` devolve o próprio `$HOME` e o app passava a ler `~/Reuniões` (vazia) em vez de `~/Documents/Reuniões`.
+
 ## [0.9.0] — 2026-10-20
 
 - **Reunião na nuvem:** a aba REUNIÃO ganha o combo **MOTOR** (Local, Grok ou ElevenLabs), salvo em `meeting_engine`. Com Grok ou ElevenLabs, o provedor transcreve e separa as vozes (`diarize`), sem Nemotron nem GPU, pro notebook sem NVIDIA gravar reunião com quem falou o quê. Cada lado sobe uma vez em Opus 32k só com os trechos de fala, os dois em paralelo, e a transcrição não segura o ditado nem a troca de modelo. Arquivo importado com número fixo de falantes passa o número pra ElevenLabs (`num_speakers`). Reunião real de 9 min: 10 s no Grok, 14 s na ElevenLabs. O padrão continua Local.

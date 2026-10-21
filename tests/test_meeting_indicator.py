@@ -70,7 +70,8 @@ class MeetingCommandTests(unittest.TestCase):
         panel.ready_status = Mock()
         panel._write_state = Mock()
         panel._set_ready_text = Mock()
-        for name in ('start_btn', 'pause_btn', 'stop_btn', 'import_btn', 'previous'):
+        panel._refresh_list = Mock()
+        for name in ('start_btn', 'pause_btn', 'stop_btn', 'import_btn'):
             setattr(panel, name, Mock())
         return panel
 

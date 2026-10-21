@@ -271,6 +271,13 @@ class FolderTests(unittest.TestCase):
             self.assertEqual(renamed.name, "202609251005 Weekly")
             self.assertEqual(rec.read_manifest(renamed)["title"], "x")
 
+    def test_meetings_root_ignores_home_when_documents_dir_is_unset(self):
+        with tempfile.TemporaryDirectory() as home, patch.object(rec.Path, "home", return_value=Path(home)):
+            for answer in (home + "\n", ""):
+                with self.subTest(answer=answer), \
+                     patch.object(rec.subprocess, "run", return_value=SimpleNamespace(stdout=answer)):
+                    self.assertEqual(rec.meetings_root(), Path(home) / "Documents" / "Reuniões")
+
     def test_speech_gain_levels_quiet_tracks_and_leaves_silence(self):
         with tempfile.TemporaryDirectory() as root:
             quiet, empty = Path(root) / "q.raw", Path(root) / "s.raw"

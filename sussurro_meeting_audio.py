@@ -146,7 +146,11 @@ def meetings_root():
                               timeout=2).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         docs = ""
-    root = Path(docs or Path.home() / "Documents") / "Reuniões"
+    # sem XDG_DOCUMENTS_DIR o xdg-user-dir devolve o proprio $HOME: as reunioes iam
+    # pra ~/Reuniões e a lista das antigas sumia
+    if not docs or Path(docs) == Path.home():
+        docs = Path.home() / "Documents"
+    root = Path(docs) / "Reuniões"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
