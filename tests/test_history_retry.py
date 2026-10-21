@@ -274,7 +274,33 @@ class HistoryActionsTests(unittest.TestCase):
         ui.on_retry.assert_called_once_with(entry)
         ui.on_play.assert_called_once_with(str(app.HISTORY_DIR / 'saved.wav'))
         self.assertEqual(ui.on_copy.call_count, 2)
-        ui.on_copy.assert_called_with('texto pronto')
+        ui.on_copy.assert_called_with('texto pronto', 0)
+
+    def test_ctrl_c_copies_only_the_selected_part(self):
+        text = 'primeira parte, trecho escolhido, resto'
+        canvas = Mock(select_item=Mock(return_value=7), itemcget=Mock(return_value=text))
+        canvas.index.side_effect = lambda tid, where: {'sel.first': 16, 'sel.last': 31}[where]
+        ui = SimpleNamespace(_press=(0, 0, 3, 16), _text_ids={3: 7}, canvas=canvas, on_copy=Mock())
+        ui.selected_text = lambda: app.HistoryList.selected_text(ui)
+        self.assertEqual(app.HistoryList._on_copy_key(ui, None), 'break')
+        ui.on_copy.assert_called_once_with('trecho escolhido', 3, partial=True)
+
+    def test_ctrl_c_without_selection_copies_nothing(self):
+        ui = SimpleNamespace(_press=None, canvas=Mock(), on_copy=Mock())
+        ui.selected_text = lambda: app.HistoryList.selected_text(ui)
+        app.HistoryList._on_copy_key(ui, None)
+        ui.on_copy.assert_not_called()
+
+    def test_copy_goes_through_wl_copy_thread_and_flashes_the_row(self):
+        done = threading.Event()
+        ui = SimpleNamespace(status=Mock(), hist_frame=Mock(), _ui=lambda fn, *a: (fn(*a), done.set()))
+        ui._copy_text = lambda text, cb=None: app.App._copy_text(ui, text, cb)
+        with patch.object(app, 'set_clipboard_text', return_value=True) as write:
+            app.App._copy_entry(ui, 'olá mundo', 2, partial=True)
+            self.assertTrue(done.wait(2))
+        write.assert_called_once_with('olá mundo')
+        ui.hist_frame.flash_copied.assert_called_once_with(2)
+        self.assertIn('Trecho copiado (9 caracteres)', ui.status.configure.call_args.kwargs['text'])
 
 
 if __name__ == '__main__':

@@ -140,6 +140,9 @@ INK_3 = "#9ba0a4"
 ACCENT = "#f0500a"         # nunca carrega texto claro (grafite por cima: 4,96:1)
 ACCENT_HOVER = "#d64708"
 ACCENT_TEXT = "#f07944"    # laranja-como-texto no escuro
+COPIED_BG = "#1f3326"      # linha recem-copiada no historico (pisca e volta)
+COPIED_INK = "#8fd18f"
+SELECT_BG = "#5a3420"      # trecho selecionado com o mouse no historico
 GRAPHITE = "#16181a"       # tinta sobre o laranja
 ENGINE_COLORS = {"ok": "#7fd18b", "aviso": ACCENT_TEXT, "off": "#f08080"}  # EM USO AGORA
 
@@ -3006,6 +3009,8 @@ class HistoryList(ctk.CTkFrame):
 
     WHEEL_PX = 96        # pixels por clique da roda (uns 2 ditados curtos)
     SCROLL_FRAME_MS = 12  # ~80 fps na animacao do scroll
+    DRAG_PX = 4           # arrasto menor que isso ainda e clique (copia o ditado todo)
+    COPIED_MS = 1400      # quanto tempo a linha fica marcada como copiada
 
     def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy, on_retry):
         super().__init__(master, fg_color="transparent", width=1, height=1)
@@ -3021,14 +3026,20 @@ class HistoryList(ctk.CTkFrame):
         self._hover = None
         self._bg_ids = {}
         self._icon_ids = {}
+        self._text_ids = {}
         self._content_h = 0
         self._scroll_target = None
         self._scroll_job = None
+        self._press = None      # (x, y, linha, indice do caractere) do botao apertado
+        self._dragging = False
+        self._flash_job = None
+        self._flash_row = None  # linha verde de "copiado": o hover nao pinta por cima
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
         self.canvas = tk.Canvas(self, bg=SURFACE, highlightthickness=0, bd=0,
-                                yscrollincrement=1)
+                                yscrollincrement=1, selectbackground=SELECT_BG,
+                                selectforeground=INK, takefocus=1)
         self.sb = ctk.CTkScrollbar(self, orientation="vertical", command=self._on_scrollbar,
                                    fg_color="transparent", width=12)
         self.canvas.configure(yscrollcommand=self.sb.set)
@@ -3038,7 +3049,11 @@ class HistoryList(ctk.CTkFrame):
         self.canvas.bind("<Configure>", self._on_cfg)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", self._on_leave)
-        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Control-c>", self._on_copy_key)
+        self.canvas.bind("<Control-C>", self._on_copy_key)
         top = self.winfo_toplevel()
         top.bind_all("<MouseWheel>", self._on_wheel, add=True)
         top.bind_all("<Button-4>", self._on_wheel, add=True)
@@ -3146,14 +3161,14 @@ class HistoryList(ctk.CTkFrame):
     def _set_hover(self, idx):
         if idx == self._hover:
             return
-        if self._hover is not None and self._hover in self._bg_ids:
+        if self._hover is not None and self._hover in self._bg_ids and self._hover != self._flash_row:
             self.canvas.itemconfigure(self._bg_ids[self._hover], fill=SURFACE)
             failed = self._entries[self._hover].get("failed")
             for kind, iid in self._icon_ids.get(self._hover, ()):
                 self.canvas.itemconfigure(
                     iid, fill=ACCENT_TEXT if (failed and kind == "retry") else INK_3)
         self._hover = idx
-        if idx is not None and idx in self._bg_ids:
+        if idx is not None and idx in self._bg_ids and idx != self._flash_row:
             self.canvas.itemconfigure(self._bg_ids[idx], fill=SURFACE_2)
             failed = self._entries[idx].get("failed")
             for kind, iid in self._icon_ids.get(idx, ()):
@@ -3183,7 +3198,89 @@ class HistoryList(ctk.CTkFrame):
         elif zone == "retry" or (entry.get("failed") and zone in ("text", "row")):
             self.on_retry(entry)
         elif zone in ("copy", "text") and entry.get("text"):
-            self.on_copy(entry["text"])
+            self.on_copy(entry["text"], h["i"])
+
+    # -- selecao de trecho ----------------------------------------------------
+    def _on_press(self, event):
+        """Apertar no texto arma um arrasto; soltar sem arrastar e o clique de sempre."""
+        self.canvas.focus_set()  # Ctrl+C chega no canvas
+        self.canvas.select_clear()
+        self._dragging = False
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        h, zone = self._hit(x, y)
+        self._press = None
+        if h is not None and zone == "text" and not self._entries[h["i"]].get("failed"):
+            tid = self._text_ids.get(h["i"])
+            if tid is not None:
+                self._press = (event.x, event.y, h["i"], self.canvas.index(tid, f"@{int(x)},{int(y)}"))
+
+    def _on_drag(self, event):
+        if self._press is None:
+            return
+        x0, y0, i, start = self._press
+        if not self._dragging and abs(event.x - x0) + abs(event.y - y0) < self.DRAG_PX:
+            return
+        self._dragging = True
+        tid = self._text_ids[i]
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        end = self.canvas.index(tid, f"@{int(x)},{int(y)}")
+        self.canvas.select_from(tid, start)
+        self.canvas.select_to(tid, end)
+
+    def _on_release(self, event):
+        if self._dragging:
+            self._dragging = False
+            return
+        self._press = None
+        self._on_click(event)
+
+    def selected_text(self):
+        """Trecho selecionado com o mouse e a linha dele, ou (None, None)."""
+        if self._press is None or not self.canvas.select_item():
+            return None, None
+        i = self._press[2]
+        tid = self._text_ids.get(i)
+        if tid is None:
+            return None, None
+        try:
+            first = self.canvas.index(tid, "sel.first")
+            last = self.canvas.index(tid, "sel.last")
+        except tk.TclError:
+            return None, None
+        text = self.canvas.itemcget(tid, "text")[first:last + 1]
+        return (text, i) if text.strip() else (None, None)
+
+    def _on_copy_key(self, _event):
+        text, i = self.selected_text()
+        if text:
+            self.on_copy(text, i, partial=True)
+        return "break"
+
+    def flash_copied(self, i):
+        """Marca a linha como copiada por um instante: fundo verde e o icone vira ✓."""
+        if self._flash_job is not None:
+            self.after_cancel(self._flash_job)
+            self._flash_job = None
+            self._redraw()
+        bg = self._bg_ids.get(i)
+        icons = dict(self._icon_ids.get(i, ()))
+        if bg is None:
+            return
+        self._flash_row = i
+        self.canvas.itemconfigure(bg, fill=COPIED_BG)
+        if "play" in icons:
+            self.canvas.itemconfigure(icons["play"], state="hidden")  # o aviso ocupa o lugar dele
+        if "copy" in icons:
+            self.canvas.itemconfigure(icons["copy"], text="✓ Copiado", fill=COPIED_INK,
+                                      font=(self.font_ui, 10, "bold"), anchor="e")
+            box = next(h["copy"] for h in self._hits if h["i"] == i)
+            self.canvas.coords(icons["copy"], box[2] - self._s(2), self.canvas.coords(icons["copy"])[1])
+        def restore():
+            self._flash_job = self._flash_row = None
+            self.canvas.select_clear()
+            self._press = None
+            self._redraw()
+        self._flash_job = self.after(self.COPIED_MS, restore)
 
     # -- desenho --------------------------------------------------------------
     def _redraw(self):
@@ -3193,7 +3290,10 @@ class HistoryList(ctk.CTkFrame):
         self._hits = []
         self._bg_ids = {}
         self._icon_ids = {}
+        self._text_ids = {}
         self._hover = None
+        self._flash_row = None
+        self._press = None
         w = self._width
         if w < 40:
             return
@@ -3280,6 +3380,7 @@ class HistoryList(ctk.CTkFrame):
                 "text": (text_x, y, play_x0 - s(4), y + row_h),
             })
             self._bg_ids[i] = bg
+            self._text_ids[i] = tid
             self._icon_ids[i] = (("play", play_id), ("copy", copy_id), ("retry", retry_id))
             y += row_h + 1
         self._content_h = y + s(10)
@@ -3655,10 +3756,26 @@ class App:
         if self._tab == "estatisticas":
             self._render_stats()
 
-    def _copy_entry(self, text: str):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.status.configure(text="Transcricao copiada para a area de transferencia.")
+    def _copy_text(self, text: str, done=None):
+        """Copia por wl-copy/xclip numa thread. O clipboard do Tk (XWayland) deixava a janela
+        dona da selecao, servindo cada leitor (os wl-paste --watch do Omarchy) no laco da
+        interface, e as vezes travava o app."""
+        def work():
+            ok = set_clipboard_text(text)
+            if done is not None:
+                self._ui(done, ok)
+        threading.Thread(target=work, name="sussurro-copiar", daemon=True).start()
+
+    def _copy_entry(self, text: str, row=None, partial=False):
+        what = "Trecho copiado" if partial else "Transcrição copiada"
+        def done(ok):
+            if not ok:
+                self.status.configure(text="Não deu pra copiar: wl-copy/xclip falhou.")
+                return
+            self.status.configure(text=f"{what} ({len(text)} caracteres).")
+            if row is not None:
+                self.hist_frame.flash_copied(row)
+        self._copy_text(text, done)
 
     def _retry_entry(self, entry: dict):
         # a lista desenha copias (com audio_removed): a marca de "refazendo" tem que ir na
@@ -4251,9 +4368,9 @@ class App:
             self._start(inject=False)
 
     def copy_all(self):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(self.text.get("1.0", "end-1c"))
-        self.status.configure(text="Copiado para a area de transferencia.")
+        text = self.text.get("1.0", "end-1c")
+        self._copy_text(text, lambda ok: self.status.configure(
+            text=f"Copiado ({len(text)} caracteres)." if ok else "Não deu pra copiar: wl-copy/xclip falhou."))
 
     def clear(self):
         self.text.delete("1.0", "end")

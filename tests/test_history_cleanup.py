@@ -5,6 +5,7 @@ from pathlib import Path
 import queue
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -202,8 +203,13 @@ class HistoryCleanupTests(unittest.TestCase):
         self.assertTrue(any('texto antigo' in text and 'Áudio removido' in text for text in rendered))
         self.assertTrue(any('Sem áudio' == text for text in rendered))
         self.assertIn('Textos mantidos', ui.status.cget('text'))
-        ui._copy_entry('texto antigo')
-        self.assertEqual(root.clipboard_get(), 'texto antigo')
+        with patch.object(app, 'set_clipboard_text', return_value=True) as write:
+            ui._copy_entry('texto antigo')
+            for _ in range(200):
+                if write.called:
+                    break
+                time.sleep(0.01)
+        write.assert_called_once_with('texto antigo')
 
 
 if __name__ == '__main__':

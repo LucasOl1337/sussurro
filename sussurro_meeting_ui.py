@@ -632,11 +632,13 @@ class MeetingPanel(ctk.CTkFrame):
 
     def _copy(self):
         text = (self.folder / rec.TRANSCRIPT).read_text(encoding='utf-8')
-        self.clipboard_clear()
-        self.clipboard_append(text)
         meta = self.done_meta.cget('text')
-        self.done_meta.configure(text='Transcrição copiada.')
-        self.after(1600, lambda: self.done_meta.configure(text=meta))
+
+        def done(ok):
+            self.done_meta.configure(text=f'✓ Transcrição copiada ({len(text)} caracteres).' if ok
+                                     else 'Não deu pra copiar: wl-copy/xclip falhou.')
+            self.after(1600, lambda: self.done_meta.configure(text=meta))
+        self.host._copy_text(text, done)
 
     def _open_folder(self):
         subprocess.Popen(['xdg-open', str(self.folder)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
