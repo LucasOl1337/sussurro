@@ -108,7 +108,7 @@ python app.py
 
 Na primeira execução o modelo local é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. O padrão é o Turbo, na GPU NVIDIA se houver e na CPU se não. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
 
-No Linux, fechar a janela só esconde a interface: o motor e os atalhos seguem rodando. Pra reabrir, use `sussurro show` (ou `python app.py show`) ou abra o app de novo. Pra encerrar de verdade, use `sussurro quit` (ou `python app.py quit`). O primeiro fechamento mostra esse aviso uma vez. No Windows, fechar a janela continua encerrando o app.
+Fechar a janela (X ou Super+W) encerra o app de vez, motor e atalhos juntos, como qualquer programa. Uma reunião gravando fica no cache e a próxima abertura oferece salvar. Com o app aberto, `sussurro show` traz a janela e `sussurro quit` encerra pelo terminal.
 
 ## Escolha do modelo
 

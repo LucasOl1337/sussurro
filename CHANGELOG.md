@@ -4,6 +4,7 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Fechar encerra de verdade:** Super+W ou o X da janela fecham o Sussurro de vez, como qualquer programa. Antes, no Linux, a janela só sumia e o app seguia rodando até um `sussurro quit`.
 - **Lista de reuniões na aba REUNIÃO:** uma coluna à esquerda mostra todas as reuniões salvas (título, dia e duração), com a aberta em destaque; um clique troca de reunião e **+ Nova reunião** volta pra gravação. Antes só havia o combo ABRIR ANTERIOR na tela inicial e, com uma transcrição aberta, não dava pra ir pra outra. Durante gravação ou transcrição a lista fica só pra ver.
 - **Reuniões antigas não somem mais:** sem a pasta Documentos configurada, o `xdg-user-dir` devolve o próprio `$HOME` e o app passava a ler `~/Reuniões` (vazia) em vez de `~/Documents/Reuniões`.
 

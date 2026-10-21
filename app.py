@@ -3290,7 +3290,6 @@ class HistoryList(ctk.CTkFrame):
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self._close_notice_shown = False
         root.title("Sussurro")
         assets = Path(__file__).with_name("assets")
         ico, png = assets / "sussurro.ico", assets / "sussurro.png"
@@ -3561,15 +3560,8 @@ class App:
         return ctk.CTkButton(master, **opts)
 
     def _close(self):
-        if IS_WIN:
-            self._quit()
-            return
-        self.root.withdraw()
-        if not self._close_notice_shown:
-            self._close_notice_shown = True
-            notice = "Segue rodando. Reabrir: sussurro show. Sair: sussurro quit."
-            self.status.configure(text=notice)
-            self.bar.flash("busy", notice, 12000)
+        # fechar a janela (Super+W, X) encerra o app, como qualquer programa
+        self._quit()
 
     def _show(self):
         self.root.deiconify()

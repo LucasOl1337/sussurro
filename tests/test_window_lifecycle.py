@@ -1,4 +1,4 @@
-"""Janela Linux oculta sem encerrar o motor; Tk opt-in e socket temporario."""
+"""Fechar a janela encerra o app; show/quit pelo socket; Tk opt-in e socket temporario."""
 import os
 import queue
 import subprocess
@@ -18,7 +18,6 @@ import app
 def ui_fixture(root):
     ui = app.App.__new__(app.App)
     ui.root = root
-    ui._close_notice_shown = False
     ui.compare_panel = Mock()
     ui.meeting_panel = Mock()
     ui.status = Mock()
@@ -40,30 +39,20 @@ def ui_fixture(root):
 
 
 class WindowLifecycleTests(unittest.TestCase):
-    def test_linux_close_withdraws_without_touching_workers_and_warns_once(self):
-        ui = ui_fixture(Mock())
-        with patch.object(app, 'IS_WIN', False):
-            app.App._close(ui)
-            app.App._close(ui)
-        self.assertEqual(ui.root.withdraw.call_count, 2)
-        ui.root.destroy.assert_not_called()
-        ui.compare_panel.close.assert_not_called()
-        ui.meeting_panel.close.assert_not_called()
-        ui.transcriber.cancel.assert_not_called()
-        ui.hotkey._listener.stop.assert_not_called()
-        ui._ipc._stop.set.assert_not_called()
-        self.assertEqual(ui.bar.flash.call_count, 1)
-        self.assertIn('sussurro show', ui.bar.flash.call_args[0][1])
-        self.assertIn('sussurro quit', ui.bar.flash.call_args[0][1])
-
-    def test_windows_close_keeps_destroying_as_before(self):
-        ui = ui_fixture(Mock())
-        with patch.object(app, 'IS_WIN', True):
-            app.App._close(ui)
-        ui.root.withdraw.assert_not_called()
-        ui.root.destroy.assert_called_once()
-        ui.compare_panel.close.assert_called_once()
-        ui.meeting_panel.close.assert_called_once()
+    def test_close_quits_like_a_normal_program_on_every_platform(self):
+        for is_win in (False, True):
+            with self.subTest(is_win=is_win):
+                ui = ui_fixture(Mock())
+                with patch.object(app, 'IS_WIN', is_win):
+                    app.App._close(ui)
+                ui.root.withdraw.assert_not_called()
+                ui.root.destroy.assert_called_once()
+                ui.compare_panel.close.assert_called_once()
+                ui.meeting_panel.close.assert_called_once()
+                if not is_win:
+                    ui._ipc._stop.set.assert_called_once()
+                    ui.gestures.stop.assert_called_once()
+                    ui.hotkey._listener.stop.assert_called_once()
 
     def test_show_runs_on_ui_queue_and_quit_does_not_schedule_after_destroy(self):
         ui = ui_fixture(Mock())
@@ -97,7 +86,7 @@ class WindowLifecycleTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('SUSSURRO_TEST_TK') == '1', 'Tk isolado opt-in')
 class HiddenWindowTkTests(unittest.TestCase):
-    def test_wm_close_keeps_socket_and_toggle_and_show_or_duplicate_restore_window(self):
+    def test_wm_close_ends_app_and_socket(self):
         root = tk.Tk()
         ui = ui_fixture(root)
         root.protocol('WM_DELETE_WINDOW', ui._close)
@@ -129,29 +118,12 @@ class HiddenWindowTkTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return result.stdout
             with patch.object(app, 'IS_WIN', False), patch.object(app, '_perf'):
-                # Invoca o callback real registrado pelo protocolo do gerenciador.
-                root.tk.call(root.protocol('WM_DELETE_WINDOW'))
-                root.update()
-                self.assertEqual(root.state(), 'withdrawn')
                 self.assertEqual(cli('status'), 'ok\n')
                 self.assertEqual(cli('toggle'), 'ok\n')
                 app.App._poll(ui)
-                root.update()
                 ui._start.assert_called_once_with(inject=True, auto_enter=False)
-                self.assertEqual(cli('show'), 'ok\n')
-                app.App._poll(ui)
-                root.update()
-                self.assertEqual(root.state(), 'normal')
-                ui._close()
-                root.update()
-                self.assertEqual(root.state(), 'withdrawn')
-                self.assertIn('ja esta rodando', cli())
-                app.App._poll(ui)
-                root.update()
-                self.assertEqual(root.state(), 'normal')
-                self.assertEqual(ui.bar.flash.call_count, 1)
-                self.assertEqual(cli('quit'), 'ok\n')
-                app.App._poll(ui)
+                # Invoca o callback real registrado pelo protocolo do gerenciador.
+                root.tk.call(root.protocol('WM_DELETE_WINDOW'))
                 worker.join(2)
                 self.assertFalse(worker.is_alive())
                 self.assertFalse(path.exists())
