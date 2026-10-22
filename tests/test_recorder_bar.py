@@ -129,6 +129,17 @@ class RecorderBarTkTests(unittest.TestCase):
         self.bar.finish()
         self.assertEqual(self.bar._state, 'meeting')
 
+    def test_scaled_window_fills_capsule_and_maps_clicks(self):
+        # escala 1.5 com force_zero_scaling: a regra de 152x40 logicos chega como 228x60 px
+        self.bar.win.geometry('228x60')
+        self.root.update()
+        self.assertEqual(self.bar._px, (228, 60))
+        self.assertEqual(self.bar._render().size, (228, 60))
+        self.click(self.bar.RX * 1.5, self.bar.CY * 1.5)
+        self.confirm.assert_called_once_with()
+        self.cancel.assert_not_called()
+
+
 
 class RecorderBarCancelTests(unittest.TestCase):
     def test_cancel_calls_processing_cancel_and_hides_bar(self):

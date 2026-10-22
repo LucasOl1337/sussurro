@@ -2217,9 +2217,16 @@ class RecorderBar:
                     pass
             self.TRANSPARENT = self.PILL_BG  # fora da capsula fica a cor dela; o rounding corta
             canvas_bg = self.PILL_BG
+        # Com escala fracionaria (xwayland:force_zero_scaling) a regra de 152x40 logicos
+        # vira 228x60 px no X11: a capsula acompanha o tamanho real da janela, senao a
+        # sobra aparece no cinza padrao do Tk.
+        self._k = 1.0
+        self._px = (self.W, self.H)
+        self.win.configure(bg=canvas_bg)
         self.canvas = tk.Canvas(self.win, width=self.W, height=self.H,
                                 bg=canvas_bg, highlightthickness=0, cursor="fleur")
-        self.canvas.pack()
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", self._resized)
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag_move)
         self.canvas.bind("<ButtonRelease-1>", self._release)
@@ -2301,8 +2308,8 @@ class RecorderBar:
         cx, cy = cursor_pos()
         left, top, right, bottom = monitor_work_area(cx, cy)
         rx, ry = self.get_rel_pos()
-        x = int(left + rx * (right - left - self.W))
-        y = int(top + ry * (bottom - top - self.H))
+        x = int(left + rx * (right - left - self._px[0]))
+        y = int(top + ry * (bottom - top - self._px[1]))
         return x, y
 
     def _follow(self):
@@ -2380,7 +2387,16 @@ class RecorderBar:
         self.root.after(self.FPS_MS, self._tick)
 
     # -- mouse ---------------------------------------------------------------
+    def _resized(self, event):
+        k = min(event.width / self.W, event.height / self.H)
+        if k <= 0 or abs(k - self._k) < 0.01:
+            return
+        self._k = k
+        self._px = (max(1, round(self.W * k)), max(1, round(self.H * k)))
+        self._draw()
+
     def _zone(self, x, y):
+        x, y = x / self._k, y / self._k
         if self._state == "meeting":
             return None  # indicador apenas: nao confundir X de ditado com parar reuniao
         if self._state in ("busy", "error"):
@@ -2437,10 +2453,11 @@ class RecorderBar:
 
     def _save_pos(self):
         wx, wy = self.win.winfo_x(), self.win.winfo_y()
-        cx, cy = wx + self.W // 2, wy + self.H // 2
+        pw, ph = self._px
+        cx, cy = wx + pw // 2, wy + ph // 2
         left, top, right, bottom = monitor_work_area(cx, cy)
-        rx = (wx - left) / max(right - left - self.W, 1)
-        ry = (wy - top) / max(bottom - top - self.H, 1)
+        rx = (wx - left) / max(right - left - pw, 1)
+        ry = (wy - top) / max(bottom - top - ph, 1)
         self.save_rel_pos([round(min(max(rx, 0.0), 1.0), 4),
                            round(min(max(ry, 0.0), 1.0), 4)])
 
@@ -2469,7 +2486,7 @@ class RecorderBar:
                    font=self._notice_font, fill=color, anchor="mt")
             d.text((self.W / 2 * s, 21 * s), f"{seconds // 60:02d}:{seconds % 60:02d}",
                    font=self._reason_font, fill=INK_2, anchor="mt")
-            return img.resize((self.W, self.H), Image.BOX)
+            return img.resize(self._px, Image.BOX)
         if self._feedback:
             kind, reason, _ = self._feedback
             active = self._state in ("rec", "proc")
@@ -2485,7 +2502,7 @@ class RecorderBar:
                       font=self._reason_font, fill=INK_2, anchor="lt" if width > w else "mt")
             img.paste(strip, (round(x0 * s), 5 * s))
             if not active:
-                return img.resize((self.W, self.H), Image.BOX)
+                return img.resize(self._px, Image.BOX)
         else:
             self._draw_wave(d)
         self._draw_cancel(d)
@@ -2493,7 +2510,7 @@ class RecorderBar:
             self._draw_confirm(d)
         else:
             self._draw_spinner(d)
-        return img.resize((self.W, self.H), Image.BOX)
+        return img.resize(self._px, Image.BOX)
 
     def _draw_wave(self, d):
         s = self.SS
