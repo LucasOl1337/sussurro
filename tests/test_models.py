@@ -356,6 +356,34 @@ class CloudTranscriberTests(unittest.TestCase):
         self.assertEqual(config, ModelConfig(XAI, 'cloud', 'api'))
         self.assertIsNone(self.t._local)  # nada de Turbo emprestado
 
+    def test_meeting_reuses_dictation_model_when_it_is_the_one_chosen(self):
+        self.t.model_config = ModelConfig('large-v3', 'cuda', 'int8_float16')
+        with patch.object(app, 'WhisperModel') as made:
+            model, config = self.t.meeting_model('large-v3')
+        made.assert_not_called()
+        self.assertIs(model, self.cloud)
+        self.assertTrue(self.t.shares_dictation_model(model))
+
+    def test_meeting_with_another_local_model_loads_its_own_without_the_lock(self):
+        self.t.model_config = ModelConfig('large-v3-turbo', 'cuda', 'int8_float16')
+        own, config = self.local(), ModelConfig('large-v3', 'cuda', 'int8_float16')
+        with patch.object(app, 'WhisperModel', return_value=own) as made, \
+             patch.object(app, 'model_path', return_value='/cache'), \
+             patch.object(app, 'resolve_model_config', return_value=config):
+            self.assertEqual(self.t.meeting_model('large-v3'), (own, config))
+        made.assert_called_once_with('/cache', device='cuda', compute_type='int8_float16')
+        self.assertFalse(self.t.shares_dictation_model(own))
+        self.assertIsNone(self.t._local)  # nao vira o Turbo emprestado do ditado
+
+    def test_meeting_turbo_borrows_local_when_dictation_is_cloud(self):
+        local = self.local()
+        config = ModelConfig('large-v3-turbo', 'cpu', 'int8')
+        with patch.object(app, 'WhisperModel', return_value=local), \
+             patch.object(app, 'model_path', return_value='/cache'), \
+             patch.object(app, 'fallback_config', return_value=config):
+            self.assertEqual(self.t.meeting_model('large-v3-turbo'), (local, config))
+        self.assertTrue(self.t.shares_dictation_model(local))
+
     def test_cloud_meeting_does_not_hold_model_swaps(self):
         self.t.model = None  # modelo do ditado ainda carregando: reuniao na nuvem segue
         self.t.begin_meeting_job(cloud=True)
@@ -368,7 +396,7 @@ class CloudTranscriberTests(unittest.TestCase):
     def test_meeting_engine_setting_is_normalized(self):
         from sussurro_models import normalize_meeting_engine
         self.assertEqual([normalize_meeting_engine(v) for v in (XAI, ELEVENLABS, 'local', 'large-v3', None)],
-                         [XAI, ELEVENLABS, 'local', 'local', 'local'])
+                         [XAI, ELEVENLABS, 'large-v3-turbo', 'large-v3', 'large-v3-turbo'])
 
     def test_switch_to_cloud_without_credentials_keeps_current_model(self):
         current, config = Mock(), ModelConfig('large-v3', 'cuda', 'int8_float16')

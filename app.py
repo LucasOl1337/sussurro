@@ -208,7 +208,7 @@ DEFAULT_SETTINGS = {
     "inject_method": "colar",   # colar (clipboard + atalho do app focado) | digitar
     "dot_pos": [0.5, 0.94],     # posicao da bolinha, fracao da area util do monitor
     "feedback_sounds": False,
-    "meeting_engine": MEETING_LOCAL,  # local | cloud-xai | cloud-elevenlabs (aba REUNIAO)
+    "meeting_engine": LOCAL_DEFAULT,  # qualquer modelo do seletor (aba REUNIAO)
     "devices": dict(devmod.DEFAULTS),  # gestos de dispositivos (aba OMARCHY, so Linux)
 }
 
@@ -1106,18 +1106,39 @@ class Transcriber:
                     self._model_lock.release()
 
     def meeting_model(self, engine=MEETING_LOCAL):
-        """Motor da reuniao. `MEETING_LOCAL`: o modelo do ditado, ou o Turbo emprestado se o
-        ditado for de nuvem. Grok/ElevenLabs: um CloudModel proprio, fora do _model_lock
-        (o provedor separa as vozes e o ditado segue livre); o chamador fecha com close().
+        """Motor da reuniao. Grok/ElevenLabs: um CloudModel proprio, fora do _model_lock (o
+        provedor separa as vozes e o ditado segue livre); o chamador fecha com close().
+        Turbo/Large-v3: o modelo do ditado quando e o mesmo, o Turbo emprestado quando o
+        ditado e de nuvem, ou um modelo so desta reuniao, que vai embora com ela (sem o
+        _model_lock: `shares_dictation_model` diz quando o lock vale). `MEETING_LOCAL`: o
+        modelo do ditado, ou o Turbo emprestado se o ditado for de nuvem.
         Chamar com o job de reuniao aberto."""
         if is_cloud(engine):
             model = CloudModel(engine)
             model.check()  # sem credencial: erro claro antes de subir audio
             return model, resolve_model_config({"whisper_model": engine})
         with self._model_lock:
-            if self._is_cloud_locked():
-                return self._borrow_local_locked(), self._local_config
-            return self.model, self.model_config
+            dictation = self.model_config.model if self.model_config is not None else None
+            if engine == MEETING_LOCAL or (engine == LOCAL_DEFAULT and self._is_cloud_locked()):
+                if self._is_cloud_locked():
+                    return self._borrow_local_locked(), self._local_config
+                return self.model, self.model_config
+            if engine == dictation:
+                return self.model, self.model_config
+            if self._local_config is not None and self._local_config.model == engine:
+                self._local_used = time.monotonic()
+                return self._local, self._local_config
+        config = resolve_model_config({"whisper_model": engine, "whisper_device": self._fallback_device})
+        t0 = time.perf_counter()
+        model = WhisperModel(model_path(config.model, download_model), device=config.device,
+                             compute_type=config.compute_type)
+        _perf("meeting_model_loaded", model=config.model, device=config.device,
+              load_s=round(time.perf_counter() - t0, 3))
+        return model, config
+
+    def shares_dictation_model(self, model):
+        """O modelo da reuniao e o do ditado (ou o Turbo emprestado): usa sob o _model_lock."""
+        return model is not None and (model is self.model or model is self._local)
 
     def _replace_model_locked(self, config):
         """Chamador segura _model_lock; nunca mantem dois modelos na VRAM."""

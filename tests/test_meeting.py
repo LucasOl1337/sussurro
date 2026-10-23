@@ -143,6 +143,21 @@ class MeetingTests(unittest.TestCase):
                           ("Remoto", "Beleza, entao eu comeco.")])
         self.assertEqual(result.duration_secs, 8)
 
+    def test_local_whisper_gets_no_hotwords(self):
+        """Hotwords da Biblioteca em reuniao longa fazem o whisper pular fala e repetir frase."""
+        calls = []
+
+        class Whisper(FakeModel):
+            model = feature_extractor = object()  # cara de WhisperModel
+
+            def transcribe(self, audio, **kwargs):
+                calls.append(kwargs)
+                return super().transcribe(audio, **kwargs)
+        speech = np.concatenate([tone(2, 0.2), silence(1)])
+        m.transcribe_single(speech, "pt", 1, Whisper([("Oi.", 0.0, 2.0)]), hotwords="9Router, Sussurro")
+        self.assertNotIn("hotwords", calls[0])
+        self.assertEqual(calls[0]["initial_prompt"], m.PROMPTS["pt"])
+
     def test_silence_gives_an_empty_transcript(self):
         result = m.transcribe_meeting(silence(5), silence(5), "pt", FakeModel([("Tchau.", 0, 1)]),
                                       find_voices=False)

@@ -257,9 +257,12 @@ def recognize(model, audio, language, progress=None, abort=None, hotwords=None):
         # Sequencial de proposito: em lote cada janela de 30 s vem sem o texto da anterior,
         # e janela que comeca no meio da frase sai sem pontuacao (a frase nao fecha e o
         # falante nao troca). Na GPU uma hora de reuniao ainda sai em menos de um minuto.
+        # Sem hotwords: os ~300 caracteres da Biblioteca no prompt de cada janela fazem o
+        # whisper pular fala e repetir uma frase por minutos (reuniao de 23/10/2026, 39 min:
+        # 1.490 segmentos sem, 181 com, "O que acontece, ta?" 16 vezes). A Biblioteca
+        # corrige o texto depois, como no resto da reuniao.
         segments, info = model.transcribe(audio, language=lang, beam_size=5, word_timestamps=True,
-                                          vad_filter=True, initial_prompt=PROMPTS.get(lang),
-                                          hotwords=hotwords)
+                                          vad_filter=True, initial_prompt=PROMPTS.get(lang))
     else:  # CloudModel (bench pela linha de comando) e qualquer adaptador com a mesma cara
         segments, info = model.transcribe(audio, language=lang, vad_filter=True, word_timestamps=True,
                                           hotwords=hotwords)

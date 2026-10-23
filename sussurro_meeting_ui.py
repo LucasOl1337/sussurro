@@ -1,6 +1,7 @@
 """Aba REUNIAO: grava voce e o audio do PC em duas trilhas, transcreve (local na GPU ou
 na nuvem, pelo seletor MOTOR) com quem falou o que, e abre reunioes antigas. Toda chamada
 de widget acontece na thread do Tk."""
+import gc
 import json
 import queue
 import subprocess
@@ -16,7 +17,7 @@ import customtkinter as ctk
 import sussurro_meeting as meeting
 import sussurro_meeting_audio as rec
 from sussurro_cloud import is_cloud
-from sussurro_models import MEETING_ENGINES, normalize_meeting_engine
+from sussurro_models import LOCAL_DEFAULT, MEETING_ENGINES, normalize_meeting_engine
 
 BG = '#1b1c20'
 FIELD = '#25262b'
@@ -36,7 +37,7 @@ SPEAKER_CHOICES = ('Automático', '1', '2', '3', '4', '5', '6', '7', '8')
 ENGINE_VALUES = {label: key for key, label in MEETING_ENGINES.items()}
 ABOUT = {
     'local': 'Grava o microfone padrão e o que o PC toca, em trilhas separadas. Nenhum bot entra na call e nada '
-             'sai da máquina. Tudo é transcrito no PC com o modelo do ditado (na GPU, se houver).',
+             'sai da máquina. Tudo é transcrito no PC com o modelo escolhido (na GPU, se houver).',
     'cloud': 'Grava o microfone padrão e o que o PC toca, em trilhas separadas. Nenhum bot entra na call. Ao parar, '
              'só os trechos com som de cada lado vão para {name}, que transcreve e separa as vozes; o áudio e a '
              'transcrição ficam no PC.',
@@ -69,7 +70,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.line_at = []            # (linha do texto, inicio em ms)
         self.visible = False
         self.closed = False
-        self.job_engine = 'local'    # motor do trabalho em curso (fixo do inicio ao fim)
+        self.job_engine = None       # motor do trabalho em curso (fixo do inicio ao fim)
 
         self.side = self._build_side()
         self.side.pack(side='left', fill='y', padx=(12, 0), pady=12)
@@ -255,10 +256,15 @@ class MeetingPanel(ctk.CTkFrame):
         self.play_btn = self._button(actions, 'Ouvir', self._toggle_play, width=70)
         self.play_btn.pack(side='left', padx=(8, 0))
         self._button(actions, 'Abrir pasta', self._open_folder, width=100).pack(side='left', padx=(8, 0))
-        self.again_btn = self._button(actions, 'Refazer em', self._again, width=96)
-        self.again_btn.pack(side='left', padx=(8, 0))
-        self.again_language = self._combo(actions, LANG_CHOICES, 'pt', 66)
-        self.again_language.pack(side='left', padx=(4, 0))
+
+        again = ctk.CTkFrame(view, fg_color='transparent')
+        again.pack(fill='x', padx=16, pady=(8, 0))
+        self.again_btn = self._button(again, 'Refazer com', self._again, width=104)
+        self.again_btn.pack(side='left')
+        self.again_engine = self._combo(again, list(ENGINE_VALUES), MEETING_ENGINES[LOCAL_DEFAULT], 210)
+        self.again_engine.pack(side='left', padx=(8, 0))
+        self.again_language = self._combo(again, LANG_CHOICES, 'pt', 66)
+        self.again_language.pack(side='left', padx=(8, 0))
 
         self.transcript = tk.Text(view, bg=BG, fg=INK, insertbackground=INK, relief='flat', wrap='word',
                                   font=(self.host.FONT_UI, 12), padx=12, pady=10, cursor='hand2',
@@ -412,11 +418,12 @@ class MeetingPanel(ctk.CTkFrame):
             self._offer_recovery()
 
     # -- transcricao ---------------------------------------------------------
-    def _run_job(self, stage, work):
-        """Roda `work` numa thread. Motor local: o modelo do ditado fica emprestado (nao troca
-        no meio). Motor de nuvem: modelo proprio, o ditado segue livre."""
+    def _run_job(self, stage, work, engine=None):
+        """Roda `work` numa thread com `engine` (o do seletor MOTOR, se nenhum). Motor local:
+        o modelo da reuniao fica reservado (o do ditado nao troca no meio). Motor de nuvem:
+        modelo proprio, o ditado segue livre."""
         transcriber = self.host.transcriber
-        engine = self.selected_engine()
+        engine = engine or self.selected_engine()
         cloud = is_cloud(engine)
         try:
             transcriber.begin_meeting_job(cloud=cloud)
@@ -452,16 +459,20 @@ class MeetingPanel(ctk.CTkFrame):
         """Transcreve a pasta (gravacao com duas trilhas ou arquivo importado) e grava o resultado."""
         manifest = rec.read_manifest(folder)
         transcriber = self.host.transcriber
-        # Local: modelo do ditado (ou o Turbo emprestado, se o ditado for de nuvem). Nuvem:
-        # CloudModel proprio, sem o lock do ditado.
+        self._report('stage', f'Preparando {MEETING_ENGINES[self.job_engine].split(" · ")[0]}...')
+        # O modelo do ditado (ou o Turbo emprestado) vai sob o lock dele; modelo so desta
+        # reuniao e CloudModel nao seguram o ditado.
         model, config = transcriber.meeting_model(self.job_engine)
         cloud = is_cloud(self.job_engine)
-        lock = None if cloud else transcriber._model_lock
+        lock = transcriber._model_lock if transcriber.shares_dictation_model(model) else None
         try:
             return self._transcribe_with(folder, manifest, model, config, lock)
         finally:
             if cloud:
                 model.close()
+            elif lock is None:
+                model = None
+                gc.collect()  # solta a VRAM do modelo desta reuniao
 
     def _transcribe_with(self, folder, manifest, model, config, lock):
         transcriber = self.host.transcriber
@@ -481,7 +492,8 @@ class MeetingPanel(ctk.CTkFrame):
         for line in transcript.lines:
             line.text, _ = transcriber.library.apply(line.text)  # Biblioteca tambem vale aqui
         manifest.update(duration_secs=transcript.duration_secs, language=language,
-                        detected_language=transcript.language, model=config.label if config else None,
+                        detected_language=transcript.language, engine=self.job_engine,
+                        model=config.label if config else None,
                         transcribe_s=round(time.perf_counter() - started, 1),
                         lines=[vars(line) for line in transcript.lines])
         rec.write_manifest(folder, manifest)
@@ -509,7 +521,9 @@ class MeetingPanel(ctk.CTkFrame):
         folder = self.folder
         self.manifest['language'] = self.again_language.get()
         rec.write_manifest(folder, self.manifest)
-        self._run_job('Transcrevendo de novo...', lambda: self._transcribe_folder(folder))
+        engine = ENGINE_VALUES.get(self.again_engine.get(), self.selected_engine())
+        self._run_job(f'Transcrevendo de novo com {self.again_engine.get().split(" · ")[0]}...',
+                      lambda: self._transcribe_folder(folder), engine)
 
     def import_file(self):
         if self.recording or self.abort is not None:
@@ -564,6 +578,7 @@ class MeetingPanel(ctk.CTkFrame):
         m = self.manifest
         self.done_title.set(m['title'])
         self.again_language.set(m.get('language', 'pt'))
+        self.again_engine.set(MEETING_ENGINES[self.selected_engine()])
         started = datetime.fromisoformat(m['started_at'])
         language = meeting.LANGUAGES.get(m.get('detected_language') or m.get('language'), m.get('language'))
         extra = f' · {m["model"]}' if m.get('model') else ''

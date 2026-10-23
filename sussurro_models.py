@@ -16,17 +16,14 @@ MODEL_LABELS = {
 DEVICE_LABELS = {"auto": "Automatico", "cuda": "GPU NVIDIA", "cpu": "CPU"}
 DEFAULT_MODEL_SETTINGS = {"whisper_model": LOCAL_DEFAULT, "whisper_device": "auto"}
 
-# Motor da aba REUNIAO, independente do ditado: maquina sem GPU manda a reuniao pra nuvem
+# Motor da aba REUNIAO, independente do ditado: qualquer modelo do seletor, local ou na
+# nuvem (maquina sem GPU manda a reuniao pra nuvem). "local" era o modelo do ditado, ate a v0.9.
 MEETING_LOCAL = "local"
-MEETING_ENGINES = {
-    MEETING_LOCAL: "Local · modelo do ditado",
-    XAI: "Grok (xAI) · nuvem",
-    ELEVENLABS: "ElevenLabs Scribe · nuvem",
-}
+MEETING_ENGINES = dict(MODEL_LABELS)
 
 
 def normalize_meeting_engine(value):
-    return value if isinstance(value, str) and value in MEETING_ENGINES else MEETING_LOCAL
+    return value if isinstance(value, str) and value in MEETING_ENGINES else LOCAL_DEFAULT
 
 
 @dataclass(frozen=True)
