@@ -4625,5 +4625,12 @@ if __name__ == "__main__":
     # className no Linux casa com StartupWMClass=Sussurro do .desktop (no Windows o
     # AppUserModelID ja cuida do agrupamento na taskbar).
     root = ctk.CTk() if IS_WIN else ctk.CTk(className="Sussurro")
+    if not IS_WIN:
+        # Sem cursor proprio, frame e label herdam o cursor padrao do X, que no
+        # XWayland do Hyprland (Omarchy 4.5) e uma imagem 24x24 transparente: o
+        # ponteiro sumia no painel de configuracoes. Seta explicito na raiz e em
+        # toda Toplevel; Text/Entry seguem com o xterm proprio.
+        tk.Tk.configure(root, cursor="left_ptr")
+        root.option_add("*Toplevel.cursor", "left_ptr")
     App(root)
     root.mainloop()
