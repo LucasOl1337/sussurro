@@ -172,6 +172,8 @@ class MeetingPanel(ctk.CTkFrame):
         self.start_btn.pack(side='left')
         self.pause_btn = self._button(buttons, 'Pausar', self.pause, width=100)
         self.stop_btn = self._button(buttons, 'Parar e transcrever', self.stop, width=170)
+        # aparece so quando o indicador flutuante foi escondido durante a gravacao
+        self.pill_btn = self._button(buttons, 'Mostrar indicador', self._show_pill, width=140)
         self.voices = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(view, text='Separar vozes do mesmo lado', variable=self.voices,
                         font=self.font, fg_color=ACCENT, hover_color=ACCENT_HOVER,
@@ -373,12 +375,24 @@ class MeetingPanel(ctk.CTkFrame):
         self.pause_btn.configure(text='Retomar' if self.paused else 'Pausar')
         self._set_ready_text()
 
+    def pill_dismissed(self):
+        """O indicador flutuante foi escondido: oferece trazer de volta daqui."""
+        if self.recording:
+            self.pill_btn.pack(side='left', padx=(8, 0))
+
+    def _show_pill(self):
+        self.pill_btn.pack_forget()
+        show = getattr(self.host, 'show_meeting_pill', None)
+        if show:
+            show()
+
     def _stop_capture(self):
         for source in self.sources:
             source.stop_recording()
         self.recording = False
         self.pause_btn.pack_forget()
         self.stop_btn.pack_forget()
+        self.pill_btn.pack_forget()
         self.start_btn.pack(side='left')
         self.import_btn.configure(state='normal')
         self._refresh_list()

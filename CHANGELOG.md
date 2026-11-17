@@ -4,6 +4,11 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+- **Indicador de reunião discreto:** a gravação de reunião ganhou uma pílula própria de 112×26, no estilo do Wispr Flow, com ponto vermelho piscando, tempo, **pausar/retomar** e **×** pra esconder. Antes ela ocupava a barra de ditado inteira (152×40), não tinha botão nenhum e perseguia o cursor de monitor em monitor. Agora fica onde você soltar, no monitor em que soltar (`meeting_pos` no `settings.json`), e começa embaixo, no meio da tela. Escondida, volta pelo botão **Mostrar indicador** da aba REUNIÃO ou sozinha na próxima reunião. A barra de ditado e o indicador aparecem juntos se você ditar durante a reunião.
+- **Botões e arraste da barra funcionam no Omarchy 4.5:** em workspace flutuante o Omarchy põe barra de título (hyprbars) em toda janela, e na cápsula ela cobria o X e o ✓ e roubava o arraste. A regra `sussurro-sem-titulo` tira a barra de título da cápsula e do indicador, e só entra quando o plugin existe, sem quebrar a config de quem não usa. O arraste passou a mover a janela pelo Hyprland: o pedido de posição do Tk era ignorado e a barra voltava pro lugar.
+- **Monitor em retrato:** com um monitor girado (transform 1/3), o Sussurro lia a largura e a altura do modo sem girar. A barra caía fora da tela ou no monitor errado, o cursor na metade de baixo não era achado e a colagem às vezes ia pra outra janela. Agora o tamanho do monitor no layout considera a rotação.
+- **Arraste salva a posição de verdade:** a posição salva era a de antes do último movimento, e a barra voltava um pouco ao soltar.
+
 ## [0.10.0] — 2026-10-23
 
 - **Reunião com o modelo que você escolher:** o combo **MOTOR** da aba REUNIÃO lista os quatro modelos do seletor (Turbo, Large-v3, Grok e ElevenLabs), independente do ditado, e a reunião pronta ganha **Refazer com [modelo] [idioma]**. Antes o motor local era sempre o do ditado e o Transcrever de novo rodava o mesmo modelo com as mesmas opções, devolvendo o mesmo texto. Modelo local diferente do ditado carrega à parte, fora da trava do ditado, e solta a VRAM ao terminar; `reuniao.json` grava o `engine` usado.

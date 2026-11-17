@@ -37,6 +37,20 @@ def _socket_path() -> Path | None:
     return cands[-1] if cands else None
 
 
+def logical_size(m: dict) -> tuple[float, float]:
+    """Largura e altura do monitor no layout do Hyprland.
+
+    `width`/`height` do `j/monitors` vem do modo, sem rotacao: um monitor em
+    retrato (transform 1/3/5/7) ocupa height x width no layout. Sem isto a barra
+    caia fora da tela e o cursor nao era achado no monitor girado.
+    """
+    scale = m.get("scale", 1) or 1
+    w, h = m["width"] / scale, m["height"] / scale
+    if int(m.get("transform", 0) or 0) % 2 == 1:
+        w, h = h, w
+    return w, h
+
+
 class Hypr:
     def __init__(self):
         self.sock = _socket_path()
@@ -45,7 +59,7 @@ class Hypr:
             os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = self.sock.parent.name
         self._mons = []
         self._native_mons = []
-        self._placement = None
+        self._placements = {}
         self._mons_at = 0.0
 
     def _query(self, cmd: str):
@@ -93,8 +107,8 @@ class Hypr:
                 self._mons = []
                 for m in mons:
                     w, h, x, y = outputs.get(m["name"], (m["width"], m["height"], m["x"], m["y"]))
-                    scale = m.get("scale", 1)
-                    sx, sy = w / (m["width"] / scale), h / (m["height"] / scale)
+                    lw, lh = logical_size(m)
+                    sx, sy = w / lw, h / lh
                     reserved = m.get("reserved") or [0, 0, 0, 0]
                     self._mons.append({**m, "width": w, "height": h, "x": x, "y": y,
                                        "reserved": [round(v * (sx if i % 2 == 0 else sy))
@@ -108,8 +122,7 @@ class Hypr:
             x, y = int(pos["x"]), int(pos["y"])
             mapped = {m["name"]: m for m in self.monitors()}
             for m in self._native_mons:
-                scale = m.get("scale", 1)
-                width, height = m["width"] / scale, m["height"] / scale
+                width, height = logical_size(m)
                 if m["x"] <= x < m["x"] + width and m["y"] <= y < m["y"] + height:
                     target = mapped[m["name"]]
                     return (round(target["x"] + (x - m["x"]) * target["width"] / width),
@@ -162,8 +175,8 @@ class Hypr:
         if not isinstance(monitors, list):
             return None
         monitor = next((m for m in monitors
-                        if m["x"] <= x < m["x"] + m["width"] / m.get("scale", 1)
-                        and m["y"] <= y < m["y"] + m["height"] / m.get("scale", 1)), None)
+                        if m["x"] <= x < m["x"] + logical_size(m)[0]
+                        and m["y"] <= y < m["y"] + logical_size(m)[1]), None)
         if monitor is None:
             return None
         special = (monitor.get("specialWorkspace") or {}).get("id", 0)
@@ -247,21 +260,26 @@ class Hypr:
                 raise RuntimeError("O foco mudou antes da colagem; texto preservado no historico.")
         return win
 
-    def place_bar(self, x: int, y: int) -> bool:
+    def place_bar(self, x: int, y: int, cls: str = "SussurroBar") -> bool:
+        """Leva a janela `cls` deste processo ao ponto (x, y) em coordenadas X."""
         target = self.monitor_at(x, y)
         if target is None:
             return False
         native = next(m for m in self._native_mons if m["name"] == target["name"])
-        scale = native.get("scale", 1)
-        gx = round(native["x"] + (x - target["x"]) * native["width"] / scale / target["width"])
-        gy = round(native["y"] + (y - target["y"]) * native["height"] / scale / target["height"])
-        placement = (target["name"], gx, gy)
-        if placement == self._placement:
+        lw, lh = logical_size(native)
+        gx = round(native["x"] + (x - target["x"]) * lw / target["width"])
+        gy = round(native["y"] + (y - target["y"]) * lh / target["height"])
+        return self.place_native(cls, target["name"], gx, gy)
+
+    def place_native(self, cls: str, monitor: str, gx: int, gy: int) -> bool:
+        """Move a janela `cls` deste processo para (gx, gy) do layout, no monitor dado."""
+        placement = (monitor, gx, gy)
+        if self._placements.get(cls) == placement:
             return True
         code = ('for _,w in ipairs(hl.get_windows()) do '
-                f'if w.pid=={os.getpid()} and w.class=="SussurroBar" then '
+                f'if w.pid=={os.getpid()} and w.class=={json.dumps(cls)} then '
                 'local moved=hl.dispatch(hl.dsp.window.move({window=w,monitor='
-                + json.dumps(target["name"]) + ',follow=false})); '
+                + json.dumps(monitor) + ',follow=false})); '
                 f'local placed=hl.dispatch(hl.dsp.window.move({{window=w,x={gx},y={gy},relative=false}})); '
                 'return moved.ok and placed.ok end end; return false')
         try:
@@ -270,9 +288,58 @@ class Hypr:
         except (OSError, subprocess.TimeoutExpired):
             return False
         if result.returncode == 0 and result.stdout.strip() == "true":
-            self._placement = placement
+            self._placements[cls] = placement
             return True
         return False
 
-    def reset_bar_placement(self):
-        self._placement = None
+    def own_window(self, cls: str):
+        """Cliente do Hyprland da janela `cls` deste processo (address, at, size)."""
+        clients = self._query("clients")
+        if not isinstance(clients, list):
+            return None
+        pid = os.getpid()
+        return next((c for c in clients if c.get("pid") == pid and c.get("class") == cls
+                     and c.get("mapped", True)), None)
+
+    def drag_to(self, address: str, gx: int, gy: int) -> bool:
+        """Movimento barato durante o arraste: um dispatch pelo socket, sem processo."""
+        if not self.available or not address:
+            return False
+        cmd = ("dispatch hl.dsp.window.move({window=" + json.dumps(f"address:{address}")
+               + f",x={int(gx)},y={int(gy)},relative=false}})")
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                s.connect(str(self.sock))
+                s.sendall(cmd.encode())
+                return s.recv(256).decode("utf-8", "replace").strip() == "ok"
+        except OSError:
+            return False
+
+    def native_monitor_at(self, gx: float, gy: float):
+        """Monitor (j/monitors) que contem o ponto do layout; o mais proximo se nenhum."""
+        mons = self._query("monitors")
+        if not isinstance(mons, list) or not mons:
+            return None
+        def dist(m):
+            w, h = logical_size(m)
+            dx = max(m["x"] - gx, 0, gx - (m["x"] + w - 1))
+            dy = max(m["y"] - gy, 0, gy - (m["y"] + h - 1))
+            return dx * dx + dy * dy
+        return min(mons, key=dist)
+
+    def native_monitor(self, name: str):
+        mons = self._query("monitors")
+        if not isinstance(mons, list):
+            return None
+        return next((m for m in mons if m.get("name") == name), None)
+
+    @staticmethod
+    def native_work_area(m: dict):
+        """(left, top, right, bottom) da area util do monitor no layout do Hyprland."""
+        w, h = logical_size(m)
+        rl, rt, rr, rb = (m.get("reserved") or [0, 0, 0, 0])[:4]
+        return (m["x"] + rl, m["y"] + rt, m["x"] + w - rr, m["y"] + h - rb)
+
+    def reset_bar_placement(self, cls: str = "SussurroBar"):
+        self._placements.pop(cls, None)

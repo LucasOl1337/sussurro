@@ -207,6 +207,7 @@ DEFAULT_SETTINGS = {
     "language": "pt",
     "inject_method": "colar",   # colar (clipboard + atalho do app focado) | digitar
     "dot_pos": [0.5, 0.94],     # posicao da bolinha, fracao da area util do monitor
+    "meeting_pos": {"monitor": None, "rel": [0.5, 1.0]},  # indicador de reuniao
     "feedback_sounds": False,
     "meeting_engine": LOCAL_DEFAULT,  # qualquer modelo do seletor (aba REUNIAO)
     "devices": dict(devmod.DEFAULTS),  # gestos de dispositivos (aba OMARCHY, so Linux)
@@ -2172,6 +2173,41 @@ class Transcriber:
         self._keyboard.type(text)
 
 
+def _native_drag_start(cls: str):
+    """Ponto de partida do arraste no Hyprland: janela e cursor em coordenadas nativas."""
+    h = _hypr()
+    cur = h.native_cursorpos()
+    win = h.own_window(cls)
+    if not cur or not win or not win.get("address"):
+        return None
+    return (win["address"], cur, tuple(win.get("at") or (0, 0)), tuple(win.get("size") or (0, 0)))
+
+
+def _native_drag_move(drag) -> bool:
+    address, (cx0, cy0), (ax, ay), _size = drag
+    cur = _hypr().native_cursorpos()
+    if not cur:
+        return False
+    return _hypr().drag_to(address, ax + cur[0] - cx0, ay + cur[1] - cy0)
+
+
+def _native_drag_end(drag):
+    """Onde a janela parou: (monitor, [rx, ry]) como fracao da area util desse monitor."""
+    h = _hypr()
+    address, (cx0, cy0), (ax, ay), (w, hgt) = drag
+    cur = h.native_cursorpos()
+    if not cur:
+        return None
+    x, y = ax + cur[0] - cx0, ay + cur[1] - cy0
+    mon = h.native_monitor_at(x + w / 2, y + hgt / 2)
+    if mon is None:
+        return None
+    left, top, right, bottom = h.native_work_area(mon)
+    rx = (x - left) / max(right - left - w, 1)
+    ry = (y - top) / max(bottom - top - hgt, 1)
+    return mon["name"], [round(min(max(rx, 0.0), 1.0), 4), round(min(max(ry, 0.0), 1.0), 4)]
+
+
 class RecorderBar:
     """Barra flutuante de gravacao: cancelar (X), onda ao vivo do audio e confirmar (V).
 
@@ -2185,8 +2221,13 @@ class RecorderBar:
 
     Desenho via PIL com supersampling — o canvas do Tk nao tem antialias e a capsula
     ficaria serrilhada.
+
+    No Hyprland o arraste move a janela pelo compositor (coordenadas nativas): o Tk
+    em XWayland pede `geometry` e o Hyprland ignora pedido de posicao de janela
+    gerenciada, entao a barra ficava presa onde nasceu.
     """
 
+    CLS = "SussurroBar"
     W, H = 152, 40
     PAD = 6
     BTN = 28                       # diametro dos botoes redondos
@@ -2222,7 +2263,7 @@ class RecorderBar:
         # contrib/omarchy/sussurro.lua a deixa flutuante, fixa, sem foco e com rounding,
         # que recorta os cantos — o Tk nao tem transparencia por pixel no X11.
         self.hypr = (not IS_WIN) and _hypr().available
-        self.win = tk.Toplevel(root, class_="SussurroBar")
+        self.win = tk.Toplevel(root, class_=self.CLS)
         self.win.title("Sussurro — barra")
         if not self.hypr:
             self.win.overrideredirect(True)
@@ -2262,7 +2303,6 @@ class RecorderBar:
 
         self._state = None
         self._feedback = None  # tipo, motivo, prazo monotonic
-        self._meeting = None  # pausada, segundos gravados
         self._notice_font = _pil_font(10 * self.SS)
         self._reason_font = _pil_font(8 * self.SS)
         self._hovered = None    # "cancel" | "ok" | None
@@ -2271,6 +2311,7 @@ class RecorderBar:
         self._dragging = False
         self._moved = False
         self._drag_off = (0, 0)
+        self._native_drag = None  # (address, cursor0, at0, size) no Hyprland
         self._phase = 0.0
         self._photo = None
         self._ticking = False
@@ -2343,7 +2384,7 @@ class RecorderBar:
     def show(self, state: str):
         self._feedback = None
         if self.hypr:
-            _hypr().reset_bar_placement()
+            _hypr().reset_bar_placement(self.CLS)
         self._state = state
         self._follow()
         self.win.deiconify()
@@ -2364,22 +2405,10 @@ class RecorderBar:
         self._phase = 0.0
         self._draw()
 
-    def set_meeting(self, recording: bool, paused: bool, seconds: float):
-        self._meeting = (paused, int(seconds)) if recording else None
-        if self._state in ("rec", "proc") or self._feedback:
-            return
-        if recording and self._state != "meeting":
-            self.show("meeting")
-        elif not recording and self._state == "meeting":
-            self.hide()
-
     def finish(self):
         """O trabalho acabou, mas um aviso recente precisa terminar de aparecer."""
         if self._feedback and time.monotonic() < self._feedback[2]:
             self._state = self._feedback[0]
-        elif self._meeting:
-            if self._state != "meeting":
-                self.show("meeting")
         else:
             self.hide()
 
@@ -2390,6 +2419,7 @@ class RecorderBar:
         self._moved = False
         self._pressed = None
         self._hovered = None
+        self._native_drag = None
         self.win.withdraw()
 
     def _tick(self):
@@ -2418,8 +2448,6 @@ class RecorderBar:
 
     def _zone(self, x, y):
         x, y = x / self._k, y / self._k
-        if self._state == "meeting":
-            return None  # indicador apenas: nao confundir X de ditado com parar reuniao
         if self._state in ("busy", "error"):
             return "dismiss" if 0 <= x < self.W and 0 <= y < self.H else None
         r2 = (self.BTN / 2) ** 2
@@ -2444,17 +2472,21 @@ class RecorderBar:
         self._dragging = self._pressed is None
         self._moved = False
         self._drag_off = (event.x, event.y)
+        self._native_drag = _native_drag_start(self.CLS) if self.hypr else None
 
     def _drag_move(self, event):
+        dist = abs(event.x - self._press_xy[0]) + abs(event.y - self._press_xy[1])
         if not self._dragging:
             # arrastou de dentro de um botao: passa de clique pra reposicionamento
-            if abs(event.x - self._press_xy[0]) + abs(event.y - self._press_xy[1]) < 5:
+            if dist < 5:
                 return
             self._pressed = None
             self._dragging = True
-        if abs(event.x - self._press_xy[0]) + abs(event.y - self._press_xy[1]) < 3:
+        if not self._moved and dist < 3:
             return  # tremida de clique nao conta como reposicionamento
         self._moved = True
+        if self._native_drag and _native_drag_move(self._native_drag):
+            return
         x = self.win.winfo_pointerx() - self._drag_off[0]
         y = self.win.winfo_pointery() - self._drag_off[1]
         self.win.geometry(f"+{x}+{y}")
@@ -2464,7 +2496,9 @@ class RecorderBar:
             moved, self._dragging, self._moved = self._moved, False, False
             if moved:  # so salva se saiu do lugar; clique simples no meio nao mexe em nada
                 self._save_pos()
+            self._native_drag = None
             return
+        self._native_drag = None
         zone, self._pressed = self._pressed, None
         if zone and self._zone(event.x, event.y) == zone:
             if zone == "dismiss":
@@ -2473,7 +2507,15 @@ class RecorderBar:
                 (self.on_cancel if zone == "cancel" else self.on_confirm)()
 
     def _save_pos(self):
-        wx, wy = self.win.winfo_x(), self.win.winfo_y()
+        if self._native_drag:
+            saved = _native_drag_end(self._native_drag)
+            if saved is not None:
+                _hypr().reset_bar_placement(self.CLS)
+                self.save_rel_pos(saved[1])
+                return
+        # winfo_x ainda e a posicao de antes do ultimo `geometry`: usa o ponteiro
+        wx = self.win.winfo_pointerx() - self._drag_off[0]
+        wy = self.win.winfo_pointery() - self._drag_off[1]
         pw, ph = self._px
         cx, cy = wx + pw // 2, wy + ph // 2
         left, top, right, bottom = monitor_work_area(cx, cy)
@@ -2499,15 +2541,6 @@ class RecorderBar:
                             radius=(self.H / 2 - 0.7) * s,
                             fill=self.PILL_BG, outline=notice_color if self._feedback else self.PILL_BORDER,
                             width=max(1, round(1.1 * s)))
-        if self._state == "meeting" and self._meeting:
-            paused, seconds = self._meeting
-            color = INK_3 if paused else "#7aa2c8"
-            d.ellipse([12 * s, 16 * s, 20 * s, 24 * s], fill=color)
-            d.text((self.W / 2 * s, 5 * s), "PAUSADA" if paused else "REUNIAO",
-                   font=self._notice_font, fill=color, anchor="mt")
-            d.text((self.W / 2 * s, 21 * s), f"{seconds // 60:02d}:{seconds % 60:02d}",
-                   font=self._reason_font, fill=INK_2, anchor="mt")
-            return img.resize(self._px, Image.BOX)
         if self._feedback:
             kind, reason, _ = self._feedback
             active = self._state in ("rec", "proc")
@@ -2584,6 +2617,288 @@ class RecorderBar:
         d.ellipse(box, outline=self.BTN_BG, width=w)
         start = (self._phase * 300.0) % 360.0
         d.arc(box, start, start + 100, fill=ACCENT, width=w)
+
+
+class MeetingPill:
+    """Indicador discreto de reuniao gravando, no estilo da pilula do Wispr Flow.
+
+    Uma capsula pequena com ponto e tempo; os dois botoes (pausar/retomar e esconder)
+    ficam apagados e acendem quando o mouse passa. Arrastavel pelo resto da capsula.
+    Fica onde foi solta, no monitor em que foi solta: ao contrario da barra de ditado,
+    nao persegue o cursor. Esconder vale ate a reuniao acabar; a aba REUNIAO traz
+    de volta. Janela propria (classe SussurroMeeting) pra o Hyprland dar tamanho e
+    cantos dela, sem brigar com a barra de ditado, que pode aparecer junto.
+    """
+
+    CLS = "SussurroMeeting"
+    W, H = 112, 26
+    SS = 4
+    BTN_R = 9
+    TICK_MS = 250
+
+    PILL_BG = RecorderBar.PILL_BG
+    PILL_BORDER = "#2c2e33"
+    REC = "#e5534b"
+    ICON_IDLE = "#6b6f76"
+    ICON_HOVER = INK
+    HOVER_BG = "#30323a"
+
+    def __init__(self, root: tk.Tk, get_pos, save_pos, on_pause, on_dismiss=None):
+        self.root = root
+        self.get_pos = get_pos          # {"monitor": nome|None, "rel": [rx, ry]}
+        self.save_pos = save_pos
+        self.on_pause = on_pause
+        self.on_dismiss = on_dismiss
+        self.CY = self.H / 2
+        self.PX = self.W - 36           # centro do pausar
+        self.HX = self.W - 14           # centro do esconder
+        self.hypr = (not IS_WIN) and _hypr().available
+        self.win = tk.Toplevel(root, class_=self.CLS)
+        self.win.title("Sussurro — reunião")
+        if not self.hypr:
+            self.win.overrideredirect(True)
+            if not IS_WIN:
+                try:
+                    self.win.wm_attributes("-type", "dock")
+                except tk.TclError:
+                    pass
+        self.win.attributes("-topmost", True)
+        bg = RecorderBar.TRANSPARENT if IS_WIN else self.PILL_BG
+        self._bg = bg
+        if IS_WIN:
+            self.win.attributes("-transparentcolor", bg)
+        self._k = 1.0
+        self._px = (self.W, self.H)
+        self.win.configure(bg=bg)
+        self.canvas = tk.Canvas(self.win, width=self.W, height=self.H, bg=bg,
+                                highlightthickness=0, cursor="fleur")
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", self._resized)
+        self.canvas.bind("<Button-1>", self._press)
+        self.canvas.bind("<B1-Motion>", self._drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.canvas.bind("<Motion>", lambda e: self._set_hover(self._zone(e.x, e.y)))
+        self.canvas.bind("<Leave>", lambda _e: self._set_hover(None))
+        self.win.update_idletasks()
+        if IS_WIN:
+            RecorderBar._set_exstyle(self)
+        else:
+            RecorderBar._apply_shape(self)  # X11 sem Hyprland: cantos da capsula
+        self.win.withdraw()
+
+        self._shown = False
+        self._dismissed = False
+        self._meeting = None            # (pausada, segundos)
+        self._drawn = None
+        self._hovered = None
+        self._pressed = None
+        self._press_xy = (0, 0)
+        self._dragging = False
+        self._moved = False
+        self._drag_off = (0, 0)
+        self._native_drag = None
+        self._photo = None
+        self._font = _pil_font(11 * self.SS)
+
+    # -- estado --------------------------------------------------------------
+    def update(self, recording: bool, paused: bool, seconds: float):
+        if not recording:
+            self._meeting = None
+            self._dismissed = False   # proxima reuniao volta a mostrar
+            if self._shown:
+                self._hide()
+            return
+        self._meeting = (bool(paused), int(seconds))
+        if self._dismissed:
+            return
+        if not self._shown:
+            self._show()
+        self._draw()
+
+    def visible(self) -> bool:
+        return self._shown
+
+    def reveal(self):
+        """Traz de volta um indicador escondido (botao da aba REUNIAO)."""
+        self._dismissed = False
+        if self._meeting is not None and not self._shown:
+            self._show()
+            self._draw(force=True)
+
+    def dismiss(self):
+        self._dismissed = True
+        self._hide()
+        if self.on_dismiss:
+            self.on_dismiss()
+
+    def _show(self):
+        self._shown = True
+        self._drawn = None
+        self.win.deiconify()
+        self.win.attributes("-topmost", True)
+        self._place()
+
+    def _hide(self):
+        self._shown = False
+        self._dragging = self._moved = False
+        self._pressed = self._hovered = self._native_drag = None
+        self.win.withdraw()
+
+    # -- posicao -------------------------------------------------------------
+    def _place(self):
+        pos = self.get_pos() or {}
+        rx, ry = (pos.get("rel") or [0.5, 1.0])[:2]
+        if self.hypr:
+            h = _hypr()
+            h.reset_bar_placement(self.CLS)
+            mon = h.native_monitor(pos["monitor"]) if pos.get("monitor") else None
+            if mon is None:
+                cur = h.native_cursorpos()
+                mon = h.native_monitor_at(*cur) if cur else None
+            if mon is not None:
+                left, top, right, bottom = h.native_work_area(mon)
+                gx = round(left + rx * (right - left - self.W))
+                gy = round(top + ry * (bottom - top - self.H))
+                if h.place_native(self.CLS, mon["name"], gx, gy):
+                    return
+        cx, cy = cursor_pos()
+        left, top, right, bottom = monitor_work_area(cx, cy)
+        x = int(left + rx * (right - left - self._px[0]))
+        y = int(top + ry * (bottom - top - self._px[1]))
+        self.win.geometry(f"+{x}+{y}")
+
+    # -- mouse ---------------------------------------------------------------
+    def _resized(self, event):
+        k = min(event.width / self.W, event.height / self.H)
+        if k <= 0 or abs(k - self._k) < 0.01:
+            return
+        self._k = k
+        self._px = (max(1, round(self.W * k)), max(1, round(self.H * k)))
+        self._draw(force=True)
+
+    def _zone(self, x, y):
+        x, y = x / self._k, y / self._k
+        r2 = (self.BTN_R + 2) ** 2
+        if (x - self.PX) ** 2 + (y - self.CY) ** 2 <= r2:
+            return "pause"
+        if (x - self.HX) ** 2 + (y - self.CY) ** 2 <= r2:
+            return "hide"
+        return None
+
+    def _set_hover(self, zone):
+        if zone != self._hovered:
+            self._hovered = zone
+            self.canvas.configure(cursor="hand2" if zone else "fleur")
+            self._draw()
+
+    def _press(self, event):
+        self._press_xy = (event.x, event.y)
+        self._pressed = self._zone(event.x, event.y)
+        self._dragging = self._pressed is None
+        self._moved = False
+        self._drag_off = (event.x, event.y)
+        self._native_drag = _native_drag_start(self.CLS) if self.hypr else None
+
+    def _drag_move(self, event):
+        dist = abs(event.x - self._press_xy[0]) + abs(event.y - self._press_xy[1])
+        if not self._dragging:
+            if dist < 5:
+                return
+            self._pressed = None
+            self._dragging = True
+        if not self._moved and dist < 3:
+            return
+        self._moved = True
+        if self._native_drag and _native_drag_move(self._native_drag):
+            return
+        x = self.win.winfo_pointerx() - self._drag_off[0]
+        y = self.win.winfo_pointery() - self._drag_off[1]
+        self.win.geometry(f"+{x}+{y}")
+
+    def _release(self, event):
+        drag, self._native_drag = self._native_drag, None
+        if self._dragging:
+            moved, self._dragging, self._moved = self._moved, False, False
+            if moved:
+                self._save(drag)
+            return
+        zone, self._pressed = self._pressed, None
+        if zone and self._zone(event.x, event.y) == zone:
+            if zone == "pause":
+                self.on_pause()
+            else:
+                self.dismiss()
+
+    def _save(self, drag):
+        if drag:
+            saved = _native_drag_end(drag)
+            if saved is not None:
+                _hypr().reset_bar_placement(self.CLS)
+                self.save_pos({"monitor": saved[0], "rel": saved[1]})
+                return
+        wx = self.win.winfo_pointerx() - self._drag_off[0]
+        wy = self.win.winfo_pointery() - self._drag_off[1]
+        pw, ph = self._px
+        left, top, right, bottom = monitor_work_area(wx + pw // 2, wy + ph // 2)
+        rx = (wx - left) / max(right - left - pw, 1)
+        ry = (wy - top) / max(bottom - top - ph, 1)
+        self.save_pos({"monitor": None, "rel": [round(min(max(rx, 0.0), 1.0), 4),
+                                                round(min(max(ry, 0.0), 1.0), 4)]})
+
+    # -- desenho -------------------------------------------------------------
+    def _draw(self, force: bool = False):
+        if not self._shown or self._meeting is None:
+            return
+        paused, seconds = self._meeting
+        blink = paused or seconds % 2 == 0
+        key = (paused, seconds, blink, self._hovered, self._px)
+        if key == self._drawn and not force:
+            return
+        self._drawn = key
+        self._photo = ImageTk.PhotoImage(self._render(paused, seconds, blink))
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+
+    def _render(self, paused: bool, seconds: int, blink: bool) -> Image.Image:
+        s = self.SS
+        img = Image.new("RGB", (self.W * s, self.H * s), self._bg)
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([0.6 * s, 0.6 * s, (self.W - 0.6) * s, (self.H - 0.6) * s],
+                            radius=(self.H / 2 - 0.6) * s, fill=self.PILL_BG,
+                            outline=self.PILL_BORDER, width=max(1, round(1.0 * s)))
+        # ponto: vermelho gravando (pisca a cada segundo), cinza vazado em pausa
+        r = 3.6
+        cx = 13
+        box = [(cx - r) * s, (self.CY - r) * s, (cx + r) * s, (self.CY + r) * s]
+        if paused:
+            d.ellipse(box, outline=self.ICON_IDLE, width=max(1, round(1.4 * s)))
+        else:
+            d.ellipse(box, fill=self.REC if blink else "#8f3a35")
+        h, rem = divmod(seconds, 3600)
+        text = f"{h}:{rem // 60:02d}:{rem % 60:02d}" if h else f"{rem // 60:02d}:{rem % 60:02d}"
+        d.text((22 * s, self.CY * s), text, font=self._font,
+               fill=INK_3 if paused else INK_2, anchor="lm")
+        for zone, x in (("pause", self.PX), ("hide", self.HX)):
+            hover = self._hovered == zone
+            if hover:
+                d.ellipse([(x - self.BTN_R) * s, (self.CY - self.BTN_R) * s,
+                           (x + self.BTN_R) * s, (self.CY + self.BTN_R) * s], fill=self.HOVER_BG)
+            color = self.ICON_HOVER if hover else self.ICON_IDLE
+            w = max(1, round(1.6 * s))
+            if zone == "hide":
+                a = 3.2
+                for dx in (a, -a):
+                    d.line([(x - dx) * s, (self.CY - a) * s, (x + dx) * s, (self.CY + a) * s],
+                           fill=color, width=w)
+            elif paused:  # retomar: triangulo
+                d.polygon([((x - 2.6) * s, (self.CY - 4) * s), ((x - 2.6) * s, (self.CY + 4) * s),
+                           ((x + 4) * s, self.CY * s)], fill=color)
+            else:         # pausar: duas barras
+                for dx in (-2.2, 2.2):
+                    d.rounded_rectangle([(x + dx - 1) * s, (self.CY - 4) * s,
+                                         (x + dx + 1) * s, (self.CY + 4) * s],
+                                        radius=1 * s, fill=color)
+        return img.resize(self._px, Image.BOX)
 
 
 def _mouse_button_id(button) -> str | None:
@@ -3680,6 +3995,11 @@ class App:
         self.bar = RecorderBar(root, lambda: self.settings["dot_pos"], self._save_bar_pos,
                                get_levels=lambda: self.transcriber.levels,
                                on_cancel=self._cancel, on_confirm=self._stop)
+        self.meeting_pill = None
+        if self.meeting_panel is not None:
+            self.meeting_pill = MeetingPill(
+                root, lambda: self.settings.get("meeting_pos"), self._save_meeting_pos,
+                on_pause=self.meeting_panel.pause, on_dismiss=self.meeting_panel.pill_dismissed)
 
         # Tk 9 no Linux SIGSEGV se um widget for tocado fora da thread do mainloop
         # (CTkButton.configure desenha via canvas create_text -> TkpGetColor).
@@ -4329,6 +4649,15 @@ class App:
         self._save()
         self.status.configure(text="Posicao da barra salva.")
 
+    def _save_meeting_pos(self, pos):
+        self.settings["meeting_pos"] = pos
+        self._save()
+        self.status.configure(text="Posicao do indicador de reuniao salva.")
+
+    def show_meeting_pill(self):
+        if self.meeting_pill is not None:
+            self.meeting_pill.reveal()
+
     def capture_hotkey(self):
         self.hotkey.capturing = True
         self.status.configure(text="Clique o botao do mouse desejado (meio ou laterais)...")
@@ -4531,7 +4860,8 @@ class App:
             seconds = panel.elapsed
             if panel.recording and not panel.paused:
                 seconds += time.monotonic() - panel.resumed_at
-            self.bar.set_meeting(panel.recording, panel.paused, seconds)
+            if self.meeting_pill is not None:
+                self.meeting_pill.update(panel.recording, panel.paused, seconds)
         # primeiro de tudo: a barra so fica enquanto ha trabalho. Esperar o status certo
         # a punha pra sair depois de colar e de redesenhar o historico — e e isso que o
         # olho le como travamento.

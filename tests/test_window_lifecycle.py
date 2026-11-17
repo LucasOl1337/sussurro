@@ -20,6 +20,7 @@ def ui_fixture(root):
     ui.root = root
     ui.compare_panel = Mock()
     ui.meeting_panel = Mock()
+    ui.meeting_pill = None
     ui.status = Mock()
     ui.bar = Mock()
     ui.bar.visivel.return_value = False
@@ -77,6 +78,7 @@ class WindowLifecycleTests(unittest.TestCase):
         ui.hotkey._listener = None
         ui.gestures = None
         ui.meeting_panel = None
+        ui.meeting_pill = None
         with patch.object(app, 'IS_WIN', False):
             app.App._quit(ui)
         ui.transcriber.cancel.assert_called_once_with(from_processing=True)

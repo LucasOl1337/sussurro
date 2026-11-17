@@ -18,46 +18,88 @@ import sussurro_ipc
 
 
 class MeetingIndicatorTests(unittest.TestCase):
-    def test_meeting_recording_is_visible_when_dictation_is_idle(self):
-        bar = test_bar_feedback.BarFeedbackTests().bar()
-        bar._meeting = None
-        bar.set_meeting(True, False, 65)
-        bar.finish()
-        self.assertEqual(bar._state, 'meeting')
-        bar.win.withdraw.assert_not_called()
-        bar.set_meeting(True, True, 65)
-        self.assertEqual(bar._meeting, (True, 65))
-        bar.set_meeting(False, False, 65)
-        self.assertFalse(bar.visivel())
+    def pill(self):
+        pill = app.MeetingPill.__new__(app.MeetingPill)
+        pill.win = Mock()
+        pill.hypr = False
+        pill._shown = False
+        pill._dismissed = False
+        pill._meeting = None
+        pill._place = Mock()
+        pill._draw = Mock()
+        pill.on_dismiss = Mock()
+        pill.on_pause = Mock()
+        pill._native_drag = None
+        return pill
 
-    def test_dictation_has_priority_and_meeting_returns_after_finish(self):
-        bar = test_bar_feedback.BarFeedbackTests().bar('rec')
-        bar._meeting = None
-        bar.set_meeting(True, False, 12)
-        self.assertEqual(bar._state, 'rec')
-        bar.show('proc')
-        bar.set_meeting(True, False, 13)
-        self.assertEqual(bar._state, 'proc')
+    def test_meeting_pill_is_its_own_window_and_shows_while_recording(self):
+        pill = self.pill()
+        pill.update(True, False, 65)
+        self.assertTrue(pill.visible())
+        self.assertEqual(pill._meeting, (False, 65))
+        pill.win.deiconify.assert_called_once()
+        pill.update(True, True, 66)
+        self.assertEqual(pill._meeting, (True, 66))
+        pill.win.deiconify.assert_called_once()  # nao reabre a cada poll
+        pill.update(False, False, 66)
+        self.assertFalse(pill.visible())
+        pill.win.withdraw.assert_called()
+
+    def test_dictation_bar_no_longer_carries_meeting_state(self):
+        self.assertFalse(hasattr(app.RecorderBar, 'set_meeting'))
+        bar = test_bar_feedback.BarFeedbackTests().bar('proc')
         bar.finish()
-        self.assertEqual(bar._state, 'meeting')
+        self.assertIsNone(bar._state)
+
+    def test_dismiss_hides_until_meeting_ends(self):
+        pill = self.pill()
+        pill.update(True, False, 5)
+        pill.dismiss()
+        self.assertFalse(pill.visible())
+        pill.on_dismiss.assert_called_once()
+        pill.update(True, False, 6)
+        self.assertFalse(pill.visible())
+        pill.reveal()
+        self.assertTrue(pill.visible())
+        pill.dismiss()
+        pill.update(False, False, 7)
+        pill.update(True, False, 0)  # reuniao nova volta a mostrar
+        self.assertTrue(pill.visible())
+
+    def test_click_on_buttons_pauses_or_hides(self):
+        pill = self.pill()
+        pill._k = 1.0
+        pill.W, pill.H = app.MeetingPill.W, app.MeetingPill.H
+        pill.CY, pill.PX, pill.HX = pill.H / 2, pill.W - 36, pill.W - 14
+        pill.canvas = Mock()
+        pill._hovered = None
+        pill.update(True, False, 5)
+        for x, called in ((pill.PX, pill.on_pause), (pill.HX, pill.on_dismiss)):
+            pill._press(SimpleNamespace(x=x, y=pill.CY))
+            pill._release(SimpleNamespace(x=x, y=pill.CY))
+            called.assert_called_once()
 
     def test_poll_tracks_meeting_even_outside_its_tab(self):
         ui = test_bar_feedback.AppFeedbackTests().ui()
         ui.meeting_panel = SimpleNamespace(recording=True, paused=False, elapsed=5, resumed_at=10.)
         with patch.object(app.time, 'monotonic', return_value=12.):
             ui._poll()
-        ui.bar.set_meeting.assert_called_once_with(True, False, 7.)
+        ui.meeting_pill.update.assert_called_once_with(True, False, 7.)
+        ui.bar.set_meeting.assert_not_called()
 
-    def test_error_notice_returns_to_meeting_after_expiry(self):
-        bar = test_bar_feedback.BarFeedbackTests().bar()
-        bar.set_meeting(True, False, 25)
-        with patch.object(app.time, 'monotonic', return_value=10.):
-            bar.flash('error', 'Falha no ditado.', 2000)
-        self.assertEqual(bar._state, 'error')
-        with patch.object(app.time, 'monotonic', return_value=12.1):
-            bar._tick()
-        self.assertEqual(bar._state, 'meeting')
-        bar.win.withdraw.assert_not_called()
+    def test_pill_saves_monitor_and_relative_position_after_native_drag(self):
+        hypr = SimpleNamespace(
+            native_cursorpos=Mock(side_effect=[(5500, 2000)]),
+            native_monitor_at=Mock(return_value=dict(name='DP-2', x=5360, y=0, width=2560,
+                                                     height=1440, scale=1, transform=3,
+                                                     reserved=[0, 30, 0, 0])),
+            native_work_area=app._hypr().native_work_area)
+        drag = ('0xabc', (5400, 1000), (5380, 990), (112, 26))
+        with patch.object(app, '_hypr', return_value=hypr):
+            monitor, rel = app._native_drag_end(drag)
+        self.assertEqual(monitor, 'DP-2')
+        # janela parou em (5480, 1990); area util 5360..6800 x 30..2560
+        self.assertEqual(rel, [round(120 / (1440 - 112), 4), round(1960 / (2530 - 26), 4)])
 
 
 class MeetingCommandTests(unittest.TestCase):
@@ -71,7 +113,7 @@ class MeetingCommandTests(unittest.TestCase):
         panel._write_state = Mock()
         panel._set_ready_text = Mock()
         panel._refresh_list = Mock()
-        for name in ('start_btn', 'pause_btn', 'stop_btn', 'import_btn'):
+        for name in ('start_btn', 'pause_btn', 'stop_btn', 'import_btn', 'pill_btn'):
             setattr(panel, name, Mock())
         return panel
 

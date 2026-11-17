@@ -19,6 +19,9 @@ O que as regras fazem:
 - Janela principal (`Sussurro`): opaca e renderizada mesmo sem foco, para o CUDA/Tk nao travarem em outro workspace.
 - Barra de gravacao (`SussurroBar`, 152x40): flutuante, fixa em todos os workspaces, sem tomar foco ao abrir (`no_initial_focus`) ou passar o mouse (`no_follow_mouse`), sem sombra/animacao e com `rounding = 20`. Um clique pode focar a barra e aciona X, confirmar ou arrastar. Nao use `no_focus`: no Hyprland essa regra exclui a janela do hit-test do ponteiro e os cliques passam para o app de baixo. O Tk em X11 nao tem transparencia por pixel, entao e o Hyprland que recorta os cantos da capsula.
 
+- Indicador de reunião (`SussurroMeeting`, 112x26): mesmas regras da barra, com `rounding = 13`. Fica onde foi solto; pausar e esconder pelo próprio indicador.
+- `sussurro-sem-titulo`: tira a barra de título (`hyprbars:no_bar`) que o Omarchy 4.5 põe em toda janela de workspace flutuante. Ela cobria os botões da cápsula. O campo só existe com o plugin carregado, então a regra é tentada com `pcall` e de novo quando a barra ou o indicador abrem.
+
 Valide com `hyprctl reload && hyprctl configerrors`.
 
 A barra pergunta ao Hyprland (socket `.socket.sock`) onde o cursor esta e qual a area util do monitor, porque o Tk em XWayland enxerga uma tela unica com todos os monitores e o ponteiro dele congela fora de janelas X. Coordenadas coincidem com as do X com `xwayland:force_zero_scaling` (padrao do Omarchy) e monitores em escala 1.

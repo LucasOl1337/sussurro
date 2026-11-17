@@ -12,7 +12,6 @@ class BarFeedbackTests(unittest.TestCase):
         bar = app.RecorderBar.__new__(app.RecorderBar)
         bar._state = state
         bar._feedback = None
-        bar._meeting = None
         bar.hypr = False
         bar.win = Mock()
         bar.root = Mock()
@@ -95,6 +94,7 @@ class AppFeedbackTests(unittest.TestCase):
         ui.status_queue = queue.Queue()
         ui._ui_queue = queue.Queue()
         ui.meeting_panel = None
+        ui.meeting_pill = Mock()
         return ui
 
     def test_rejected_start_reports_busy_for_loading_comparison_and_draining(self):

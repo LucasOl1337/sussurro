@@ -30,3 +30,47 @@ o.window({ class = "^SussurroBar$" }, {
   opacity = "1 1",
   render_unfocused = true,
 })
+
+-- Indicador de reuniao (classe SussurroMeeting, 112x26): pilula discreta com tempo,
+-- pausar e esconder. Mesmas regras da barra; fica onde foi solta, em todo workspace.
+o.window({ class = "^SussurroMeeting$" }, {
+  float = true,
+  pin = true,
+  no_follow_mouse = true,
+  no_initial_focus = true,
+  no_anim = true,
+  no_shadow = true,
+  no_blur = true,
+  no_dim = true,
+  border_size = 0,
+  rounding = 13,
+  size = { 112, 26 },
+  tag = "-default-opacity",
+  opacity = "1 1",
+  render_unfocused = true,
+})
+
+-- Sem barra de titulo: em workspace flutuante o Omarchy 4.5 poe a barra do hyprbars em
+-- toda janela, e na capsula ela cobria os botoes e o arraste. O campo hyprbars:no_bar so
+-- existe depois que o Omarchy carrega o plugin, o que acontece depois deste arquivo
+-- (toggles.lua) ou so quando um workspace vira flutuante: tenta agora e de novo a cada
+-- vez que a barra ou o indicador aparecem. Sem o plugin, nao ha barra a tirar.
+local sussurro_sem_titulo = false
+local function sussurro_tira_titulo()
+  if not sussurro_sem_titulo then
+    sussurro_sem_titulo = pcall(hl.window_rule, {
+      name = "sussurro-sem-titulo",
+      match = { class = "^Sussurro(Bar|Meeting)$" },
+      ["hyprbars:no_bar"] = true,
+    })
+  end
+end
+sussurro_tira_titulo()
+if hl.on then
+  hl.on("window.open", function(window)
+    local class = window and window.class
+    if class == "SussurroBar" or class == "SussurroMeeting" then
+      sussurro_tira_titulo()
+    end
+  end)
+end
