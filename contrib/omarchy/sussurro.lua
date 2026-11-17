@@ -54,10 +54,19 @@ o.window({ class = "^SussurroMeeting$" }, {
 -- toda janela, e na capsula ela cobria os botoes e o arraste. O campo hyprbars:no_bar so
 -- existe depois que o Omarchy carrega o plugin, o que acontece depois deste arquivo
 -- (toggles.lua) ou so quando um workspace vira flutuante: tenta agora e de novo a cada
--- vez que a barra ou o indicador aparecem. Sem o plugin, nao ha barra a tirar.
+-- vez que a barra ou o indicador aparecem. Sem o plugin, nao ha barra a tirar, e pedir
+-- o campo assim mesmo vira erro em `hyprctl configerrors` (o pcall nao segura o aviso).
 local sussurro_sem_titulo = false
+local function sussurro_hyprbars()
+  for _, plugin in ipairs(hl.get_loaded_plugins and hl.get_loaded_plugins() or {}) do
+    if plugin.name == "hyprbars" then
+      return true
+    end
+  end
+  return false
+end
 local function sussurro_tira_titulo()
-  if not sussurro_sem_titulo then
+  if not sussurro_sem_titulo and sussurro_hyprbars() then
     sussurro_sem_titulo = pcall(hl.window_rule, {
       name = "sussurro-sem-titulo",
       match = { class = "^Sussurro(Bar|Meeting)$" },

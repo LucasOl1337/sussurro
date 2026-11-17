@@ -31,11 +31,16 @@ local handlers = {}
 hl = {
   window_rule = function(rule)
     if not hyprbars_loaded and rule['hyprbars:no_bar'] ~= nil then
+      -- o Hyprland registra o erro em configerrors mesmo dentro de pcall
+      print('configerror=hyprbars:no_bar')
       error("hl.window_rule: unknown field 'hyprbars:no_bar'")
     end
     print('nobar.' .. rule.match.class .. '=' .. tostring(rule['hyprbars:no_bar']))
   end,
   on = function(event, fn) handlers[event] = fn end,
+  get_loaded_plugins = function()
+    return hyprbars_loaded and {{name = 'hyprbars'}} or {}
+  end,
 }
 hyprbars_loaded = false
 dofile(arg[1])
@@ -65,6 +70,7 @@ handlers['window.open']({class = 'SussurroBar'})
     def test_titlebars_of_floating_workspaces_skip_bar_and_meeting(self):
         # Sem o plugin o arquivo carrega inteiro; com ele, a regra entra uma vez so.
         self.assertEqual(self.rule['nobar_before_plugin'], 'ok')
+        self.assertNotIn('configerror', self.rule)
         self.assertEqual(self.rule['nobar.^Sussurro(Bar|Meeting)$'], 'true')
         self.assertEqual(self.output.count('nobar.'), 1)
 
