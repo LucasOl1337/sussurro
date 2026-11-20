@@ -4,6 +4,12 @@ As mudanças de cada versão do Sussurro são registradas aqui. As versões segu
 
 ## [Não lançado]
 
+## [0.12.0] — 2026-11-20
+
+- **Barra de ditado no estilo do Wispr Flow:** cápsula preta de 103×30 com borda fina, botões redondos de 18 px (× à esquerda, ✓ à direita) e dez barras de 2 px que pulsam com o nível do áudio, cada uma com seu atraso no ciclo de 1 s. Transcrevendo, as barras apagam e um círculo girando ocupa o lugar do ✓; o × volta com o mouse em cima. Entra e sai com fade de 280 ms; erro deixa a borda vermelha e rola o motivo começando do início. A regra do Omarchy acompanha o tamanho (103×30, `rounding = 15`).
+- **Janela no molde do Hub do Wispr Flow:** tema claro, barra lateral com ícones próprios no lugar da fileira de abas (Ditado, Ao vivo, Reunião, Estatísticas, Dicionário, Comparar, Omarchy e Configurações) e cartão principal com título e ações. O histórico vem agrupado por dia (Hoje, Ontem, data) numa moldura arredondada, hora à esquerda, tocar e copiar só no hover; ao lado, palavras, palavras por minuto, dias seguidos e tempo poupado. Configurações virou uma página de linhas (título, explicação, controle) no lugar da grade de combos, e EM USO AGORA com o gasto da nuvem foi para um cartão na barra lateral.
+- Estatísticas, Dicionário (antes Biblioteca), Reunião e Comparar no tema claro; gráficos em verde-azulado. Figtree e EB Garamond (SIL OFL 1.1) em `assets/fonts/`, registradas pelo app ao abrir. Nenhum asset do Wispr Flow foi copiado.
+
 ## [0.11.0] — 2026-11-17
 
 - **Indicador de reunião discreto:** a gravação de reunião ganhou uma pílula própria de 112×26, no estilo do Wispr Flow, com ponto vermelho piscando, tempo, **pausar/retomar** e **×** pra esconder. Antes ela ocupava a barra de ditado inteira (152×40), não tinha botão nenhum e perseguia o cursor de monitor em monitor. Agora fica onde você soltar, no monitor em que soltar (`meeting_pos` no `settings.json`), e começa embaixo, no meio da tela. Escondida, volta pelo botão **Mostrar indicador** da aba REUNIÃO ou sozinha na próxima reunião. A barra de ditado e o indicador aparecem juntos se você ditar durante a reunião.
