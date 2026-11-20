@@ -78,6 +78,7 @@ import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from sussurro_compare_ui import ComparisonPanel
+import sussurro_icons as icons
 if not IS_WIN:
     from sussurro_meeting_ui import MeetingPanel
 import sounddevice as sd
@@ -127,24 +128,34 @@ _LIST_ANCHOR_RE = re.compile(
 )
 _SENTENCE_END = frozenset(".!?:;…")
 
-# Paleta Asiimov (modo escuro) — skill ~/.claude/skills/asiimov
-BG = "#131417"
-SURFACE = "#1b1c20"        # card
-SURFACE_2 = "#25262b"      # campo
-SURFACE_3 = "#2f3036"      # hover de campo
-BORDER = "#2f3036"
-BORDER_STRONG = "#454750"
-INK = "#f2f3f3"
-INK_2 = "#c3c6c8"
-INK_3 = "#9ba0a4"
-ACCENT = "#f0500a"         # nunca carrega texto claro (grafite por cima: 4,96:1)
-ACCENT_HOVER = "#d64708"
-ACCENT_TEXT = "#f07944"    # laranja-como-texto no escuro
-COPIED_BG = "#1f3326"      # linha recem-copiada no historico (pisca e volta)
-COPIED_INK = "#8fd18f"
-SELECT_BG = "#5a3420"      # trecho selecionado com o mouse no historico
-GRAPHITE = "#16181a"       # tinta sobre o laranja
-ENGINE_COLORS = {"ok": "#7fd18b", "aviso": ACCENT_TEXT, "off": "#f08080"}  # EM USO AGORA
+# Paleta clara no molde do Hub do Wispr Flow: papel quente, tinta quase preta, um so
+# cinza de chapa (#eeebe3) para hover, item ativo e botao neutro.
+BG = "#f5f4f0"             # fundo do app e da barra lateral
+SURFACE = "#fcfcfb"        # cartao principal
+SURFACE_2 = "#f5f4f0"      # cartao interno (estatisticas, configuracoes)
+SURFACE_3 = "#eeebe3"      # hover, item ativo, botao neutro
+SURFACE_4 = "#e4e0d5"      # hover do botao neutro
+WHITE = "#ffffff"          # campo (dropdown, entrada)
+BORDER = "#eeebe3"
+BORDER_STRONG = "#dedad0"
+INK = "#1a1a1a"
+INK_2 = "#3f3f3c"
+INK_3 = "#71716e"
+ACCENT = "#1a1a1a"         # botao principal: chapa escura, texto claro
+ACCENT_HOVER = "#383835"
+ACCENT_TEXT = "#b4531a"    # aviso/erro como texto sobre o claro
+COPIED_BG = "#e6f2e8"      # linha recem-copiada no historico (pisca e volta)
+COPIED_INK = "#1f7a3a"
+SELECT_BG = "#d9e4f2"      # trecho selecionado com o mouse no historico
+HOVER_ROW = "#f7f6f2"      # linha do historico sob o mouse
+GRAPHITE = "#fcfcfb"       # tinta sobre o botao principal
+TEAL = "#1a5c5c"           # graficos
+TEAL_2 = "#369489"
+# barra de gravacao e indicador de reuniao continuam pilulas escuras
+PILL_INK = "#f2f3f3"
+PILL_INK_2 = "#c3c6c8"
+PILL_INK_3 = "#9ba0a4"
+ENGINE_COLORS = {"ok": "#1f7a3a", "aviso": ACCENT_TEXT, "off": "#c0392b"}  # EM USO AGORA
 
 
 def pick_font(candidates, fallback):
@@ -153,6 +164,38 @@ def pick_font(candidates, fallback):
         if name in installed:
             return name
     return fallback
+
+
+FONTS_DIR = Path(__file__).with_name("assets") / "fonts"
+
+
+def register_bundled_fonts():
+    """Figtree e EB Garamond (OFL) vem em assets/fonts. Registra antes de abrir o Tk:
+    no Windows so para este processo; no Linux copia pro diretorio de fontes do usuario
+    (o Xft do Tk le o fontconfig uma vez, na primeira fonte usada)."""
+    files = sorted(FONTS_DIR.glob("*.ttf"))
+    if not files:
+        return
+    if IS_WIN:
+        for f in files:
+            try:
+                ctypes.windll.gdi32.AddFontResourceExW(str(f), 0x10, 0)  # FR_PRIVATE
+            except (OSError, AttributeError):
+                pass
+        return
+    dest = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "fonts" / "sussurro"
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        changed = False
+        for f in files:
+            alvo = dest / f.name
+            if not alvo.exists() or alvo.stat().st_size != f.stat().st_size:
+                shutil.copyfile(f, alvo)
+                changed = True
+        if changed and shutil.which("fc-cache"):
+            subprocess.run(["fc-cache", "-f", str(dest)], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 # Biblioteca, passada fonetica: chave minima e distancia tolerada por tamanho de chave.
 # Medido no library.json real — abaixo de 6 letras a troca comeca a pegar palavra
@@ -2589,7 +2632,7 @@ class RecorderBar:
         if self._feedback:
             x0, x1 = (self.LX + self.BTN / 2 + 4, self.RX - self.BTN / 2 - 4) if active \
                 else (12, self.W - 12)
-            self._draw_notice(img, x0, x1, "#f08080" if error else INK_2)
+            self._draw_notice(img, x0, x1, "#f08080" if error else PILL_INK_2)
             if not active:
                 return self._finish(img)
         else:
@@ -2704,7 +2747,7 @@ class MeetingPill:
     PILL_BORDER = "#2c2e33"
     REC = "#e5534b"
     ICON_IDLE = "#6b6f76"
-    ICON_HOVER = INK
+    ICON_HOVER = PILL_INK
     HOVER_BG = "#30323a"
 
     def __init__(self, root: tk.Tk, get_pos, save_pos, on_pause, on_dismiss=None):
@@ -2941,7 +2984,7 @@ class MeetingPill:
         h, rem = divmod(seconds, 3600)
         text = f"{h}:{rem // 60:02d}:{rem % 60:02d}" if h else f"{rem // 60:02d}:{rem % 60:02d}"
         d.text((22 * s, self.CY * s), text, font=self._font,
-               fill=INK_3 if paused else INK_2, anchor="lm")
+               fill=PILL_INK_3 if paused else PILL_INK_2, anchor="lm")
         for zone, x in (("pause", self.PX), ("hide", self.HX)):
             hover = self._hovered == zone
             if hover:
@@ -3205,8 +3248,8 @@ MIN_DUR_PPM = 20.0          # ditado curto demais falseia o recorde de ppm
 MES_ABREV = ["jan", "fev", "mar", "abr", "mai", "jun",
              "jul", "ago", "set", "out", "nov", "dez"]
 # escala do mapa de atividade: vazio -> laranja cheio (o unico acento da casa)
-HEAT_SCALE = ["#2e2f36", "#4a2417", "#7a3312", "#b7440d", ACCENT]
-BAR_DIM = "#b7440d"         # barra normal; o pico usa ACCENT
+HEAT_SCALE = ["#eeebe3", "#cfe1dc", "#86bdb3", TEAL_2, TEAL]
+BAR_DIM = TEAL_2            # barra normal; o pico usa TEAL
 # palavras que nao dizem nada sobre o que voce fala: fora do "mais ditadas"
 STOPWORDS = {
     "que", "com", "uma", "para", "por", "dos", "das", "nao", "mais", "mas", "como",
@@ -3315,6 +3358,16 @@ def fmt_int(n) -> str:
     return f"{int(round(n)):,}".replace(",", ".")
 
 
+def fmt_compact(n) -> str:
+    """137.812 -> "137,8K"; abaixo de mil, o numero inteiro."""
+    n = int(round(n))
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}K".replace(".", ",").replace(",0K", "K")
+    return f"{n / 1_000_000:.1f}M".replace(".", ",").replace(",0M", "M")
+
+
 def fmt_dias(n: int) -> str:
     return f"{n} dia" if n == 1 else f"{n} dias"
 
@@ -3412,7 +3465,7 @@ def render_hours(por_hora: dict, cell: int = 12, altura: int = 84, s: int = 2):
             d.rectangle([x * s, (base - 2) * s, (x + largura) * s, base * s],
                         fill=HEAT_SCALE[0])
             continue
-        cor = ACCENT if palavras == teto else BAR_DIM
+        cor = TEAL if palavras == teto else BAR_DIM
         d.rounded_rectangle([x * s, (base - alt) * s, (x + largura) * s, base * s],
                             radius=2 * s, fill=cor)
     for hora in (0, 6, 12, 18):
@@ -3429,10 +3482,12 @@ class HistoryList(ctk.CTkFrame):
     DRAG_PX = 4           # arrasto menor que isso ainda e clique (copia o ditado todo)
     COPIED_MS = 1400      # quanto tempo a linha fica marcada como copiada
 
-    def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy, on_retry):
+    def __init__(self, master, font_mono, font_ui, day_label, on_play, on_copy, on_retry,
+                 font_semi=None):
         super().__init__(master, fg_color="transparent", width=1, height=1)
         self.font_mono = font_mono
         self.font_ui = font_ui
+        self.font_semi = font_semi or font_ui
         self.day_label = day_label
         self.on_play = on_play
         self.on_copy = on_copy
@@ -3461,7 +3516,7 @@ class HistoryList(ctk.CTkFrame):
                                    fg_color="transparent", width=12)
         self.canvas.configure(yscrollcommand=self.sb.set)
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.sb.grid(row=0, column=1, sticky="ns", padx=(0, 2), pady=2)
+        self.sb.grid(row=0, column=1, sticky="ns", padx=(4, 0), pady=2)
 
         self.canvas.bind("<Configure>", self._on_cfg)
         self.canvas.bind("<Motion>", self._on_motion)
@@ -3580,17 +3635,19 @@ class HistoryList(ctk.CTkFrame):
             return
         if self._hover is not None and self._hover in self._bg_ids and self._hover != self._flash_row:
             self.canvas.itemconfigure(self._bg_ids[self._hover], fill=SURFACE)
-            failed = self._entries[self._hover].get("failed")
             for kind, iid in self._icon_ids.get(self._hover, ()):
-                self.canvas.itemconfigure(
-                    iid, fill=ACCENT_TEXT if (failed and kind == "retry") else INK_3)
+                if not self._icon_pinned(self._hover, kind):
+                    self.canvas.itemconfigure(iid, state="hidden")
         self._hover = idx
         if idx is not None and idx in self._bg_ids and idx != self._flash_row:
-            self.canvas.itemconfigure(self._bg_ids[idx], fill=SURFACE_2)
-            failed = self._entries[idx].get("failed")
-            for kind, iid in self._icon_ids.get(idx, ()):
-                self.canvas.itemconfigure(
-                    iid, fill=ACCENT_TEXT if (failed and kind == "retry") else INK)
+            self.canvas.itemconfigure(self._bg_ids[idx], fill=HOVER_ROW)
+            for _kind, iid in self._icon_ids.get(idx, ()):
+                self.canvas.itemconfigure(iid, state="normal")
+
+    def _icon_pinned(self, i, kind):
+        """Acoes da linha so aparecem no hover, como no Hub; falha mantem o Refazer."""
+        entry = self._entries[i]
+        return kind == "retry" and bool(entry.get("failed") or entry.get("retrying"))
 
     def _on_motion(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
@@ -3688,10 +3745,11 @@ class HistoryList(ctk.CTkFrame):
         if "play" in icons:
             self.canvas.itemconfigure(icons["play"], state="hidden")  # o aviso ocupa o lugar dele
         if "copy" in icons:
-            self.canvas.itemconfigure(icons["copy"], text="✓ Copiado", fill=COPIED_INK,
-                                      font=(self.font_ui, 10, "bold"), anchor="e")
+            self.canvas.itemconfigure(icons["copy"], state="hidden")
             box = next(h["copy"] for h in self._hits if h["i"] == i)
-            self.canvas.coords(icons["copy"], box[2] - self._s(2), self.canvas.coords(icons["copy"])[1])
+            self.canvas.create_text(box[2] - self._s(2), self.canvas.coords(icons["copy"])[1],
+                                    text="✓ Copiado", fill=COPIED_INK, anchor="e",
+                                    font=(self.font_semi, -self._s(13)))
         def restore():
             self._flash_job = self._flash_row = None
             self.canvas.select_clear()
@@ -3715,37 +3773,49 @@ class HistoryList(ctk.CTkFrame):
         if w < 40:
             return
         s = self._s
-        padx, pady = s(14), s(9)
-        btn, gap = s(28), s(2)
-        retry_w = s(68)
-        btns_w = btn * 2 + retry_w + gap * 2 + padx + s(6)
-        y = s(6)
-        prev_day = None
-        font_day = (self.font_ui, 10, "bold")
-        font_time = (self.font_mono, 11)
-        # largura da hora medida na fonte real: com Xft a mono e mais larga que os 44 px fixos
-        time_w = tkfont.Font(font=font_time).measure("00:00") + s(12)
-        font_text = (self.font_ui, 13)
-        font_btn = (self.font_ui, 12)
+        # medidas do Hub: cartao com borda de 1 px e raio 16; hora a 16 px da borda,
+        # texto a 114 px, linhas com 16 px de respiro em cima e embaixo
+        x0, x1 = 1, w - 1
+        radius = s(16)
+        pady = s(16)
+        btn, gap = s(30), s(2)
+        btns_w = btn * 2 + gap + s(28)  # tocar e copiar; Refazer usa o mesmo lugar
+        font_day = (self.font_semi, -s(13))
+        font_time = (self.font_ui, -s(13))
+        font_text = (self.font_ui, -s(15))
+        font_btn = (self.font_ui, -s(15))
+        time_x = x0 + s(16)
+        text_x = x0 + max(s(114), tkfont.Font(font=font_time).measure("00:00") + s(40))
+        text_w = max(s(80), min(w - text_x - btns_w, s(620)))
+        y = 0
         if not self._entries:
-            self.canvas.create_text(padx, y + s(8), text="Nenhum ditado ainda.",
+            self.canvas.create_text(time_x, y + s(8), text="Nenhum ditado ainda. Segure o atalho "
+                                    "e fale: o texto aparece aqui.",
                                     fill=INK_3, anchor="nw", font=font_text)
             self._content_h = y + s(40)
             self.canvas.configure(scrollregion=(0, 0, w, self._content_h))
             return
+        prev_day = None
+        group_top = None
+
+        def close_group(bottom):
+            self._group_frame(x0, group_top, x1, bottom, radius)
+
         for i, entry in enumerate(self._entries):
             dt = datetime.fromisoformat(entry["ts"])
             day = self.day_label(dt)
             if day != prev_day:
                 if prev_day is not None:
-                    y += s(14)
-                hid = self.canvas.create_text(padx, y + s(4), text=day.upper(), fill=INK_3,
+                    close_group(y)
+                    y += s(28)
+                hid = self.canvas.create_text(x0, y, text=day.upper(), fill=INK_3,
                                               anchor="nw", font=font_day)
-                hb = self.canvas.bbox(hid)
-                mid = (hb[1] + hb[3]) / 2
-                self.canvas.create_line(hb[2] + s(10), mid, w - padx, mid, fill=BORDER)
-                y = hb[3] + s(6)
+                y = self.canvas.bbox(hid)[3] + s(10)
+                group_top = y
                 prev_day = day
+            elif i:
+                self.canvas.create_line(x0 + 1, y, x1 - 1, y, fill=BORDER)
+                y += 1
             failed = bool(entry.get("failed"))
             retrying = bool(entry.get("retrying"))
             audio_removed = bool(entry.get("audio_removed"))
@@ -3755,54 +3825,83 @@ class HistoryList(ctk.CTkFrame):
                 shown_text = "Refazendo transcrição..." + ("\n\n" + entry["text"] if entry.get("text") else "")
             elif audio_removed:
                 shown_text += "\nÁudio removido. Texto mantido."
-            text_x = padx + time_w
-            text_w = max(s(80), w - text_x - btns_w)
             tid = self.canvas.create_text(
                 text_x, y + pady, text=shown_text, fill=ACCENT_TEXT if failed else INK, anchor="nw",
                 width=text_w, font=font_text, justify="left")
             tb = self.canvas.bbox(tid)
-            th = tb[3] - tb[1]
-            row_h = max(th, btn) + pady * 2
+            row_h = max(tb[3] - tb[1], btn) + pady * 2
             bg = self.canvas.create_rectangle(
-                s(4), y, w - s(4), y + row_h, fill=SURFACE, outline="", width=0)
+                x0 + 1, y, x1 - 1, y + row_h, fill=SURFACE, outline="", width=0)
             self.canvas.tag_lower(bg, tid)
-            # hora alinhada na primeira linha do texto (fonte menor: desce 1-2 px)
-            self.canvas.create_text(
-                padx, y + pady + s(2), text=dt.strftime("%H:%M"), fill=INK_3,
-                anchor="nw", font=font_time)
-            retry_x1 = w - padx - s(4)
-            retry_x0 = retry_x1 - retry_w
-            copy_x1 = retry_x0 - gap
+            mid = y + row_h / 2
+            self.canvas.create_text(time_x, mid, text=dt.strftime("%H:%M"), fill=INK_3,
+                                    anchor="w", font=font_time)
+            copy_x1 = x1 - s(14)
             copy_x0 = copy_x1 - btn
             play_x1 = copy_x0 - gap
             play_x0 = play_x1 - btn
-            by = y + pady
-            play_id = self.canvas.create_text(
-                (play_x0 + play_x1) / 2, by + btn / 2, text="·" if audio_removed else "▶", fill=INK_3,
-                font=font_btn, anchor="center")
-            copy_id = self.canvas.create_text(
-                (copy_x0 + copy_x1) / 2, by + btn / 2,
-                text="⧉", fill=INK_3, font=font_btn, anchor="center")
-            retry_id = self.canvas.create_text(
-                (retry_x0 + retry_x1) / 2, by + btn / 2,
-                text="Sem áudio" if audio_removed else ("…" if retrying else "Refazer"), fill=ACCENT_TEXT if failed else INK_3,
-                font=(self.font_ui, 10), anchor="center")
-            # separador fino entre ditados; some no ultimo de cada dia
-            self.canvas.create_line(padx, y + row_h, w - padx, y + row_h, fill=BORDER)
-            self._hits.append({
-                "i": i, "y0": y, "y1": y + row_h,
-                "play": (play_x0, y, play_x1, y + row_h),
-                "copy": (copy_x0, y, copy_x1, y + row_h),
-                "retry": (retry_x0, y, retry_x1, y + row_h),
-                "text": (text_x, y, play_x0 - s(4), y + row_h),
-            })
+            nada = (-1, -1, -1, -1)
+            if failed or retrying:  # sem texto pra copiar: o lugar das acoes vira Refazer
+                retry_id = self.canvas.create_text(
+                    (play_x0 + copy_x1) / 2, mid, text="…" if retrying else "Refazer",
+                    fill=ACCENT_TEXT if failed else INK_2, font=(self.font_semi, -s(13)),
+                    anchor="center")
+                icons_row = (("retry", retry_id),)
+                boxes = {"play": nada, "copy": nada, "retry": (play_x0, y, copy_x1, y + row_h)}
+            else:
+                if audio_removed:  # nada pra tocar: um ponto no lugar do botao
+                    play_id = self.canvas.create_text(
+                        (play_x0 + play_x1) / 2, mid, text="·", fill=INK_3,
+                        font=font_btn, anchor="center", state="hidden")
+                else:
+                    play_id = self.canvas.create_image((play_x0 + play_x1) / 2, mid,
+                                                       image=self._row_icon("play"), state="hidden")
+                copy_id = self.canvas.create_image((copy_x0 + copy_x1) / 2, mid,
+                                                   image=self._row_icon("copy"), state="hidden")
+                icons_row = (("play", play_id), ("copy", copy_id))
+                boxes = {"play": (play_x0, y, play_x1, y + row_h),
+                         "copy": (copy_x0, y, copy_x1, y + row_h), "retry": nada}
+            self._hits.append({"i": i, "y0": y, "y1": y + row_h,
+                               "text": (text_x, y, play_x0 - s(4), y + row_h), **boxes})
             self._bg_ids[i] = bg
             self._text_ids[i] = tid
-            self._icon_ids[i] = (("play", play_id), ("copy", copy_id), ("retry", retry_id))
-            y += row_h + 1
-        self._content_h = y + s(10)
+            self._icon_ids[i] = icons_row
+            y += row_h
+        close_group(y)
+        self._content_h = y + s(12)
         self.canvas.configure(scrollregion=(0, 0, w, self._content_h))
         self.canvas.yview_moveto(frac)
+
+    def _row_icon(self, name):
+        """PhotoImage do icone de acao da linha, no tamanho da escala atual (cacheado)."""
+        size = self._s(16)
+        cache = self.__dict__.setdefault("_row_icons", {})
+        if (name, size) not in cache:
+            img = icons.icon_image(name, INK_2, size * 2, 1.8).resize((size, size), Image.LANCZOS)
+            cache[(name, size)] = ImageTk.PhotoImage(img, master=self.canvas)
+        return cache[(name, size)]
+
+    def _group_frame(self, x0, y0, x1, y1, r):
+        """Moldura arredondada do dia: mascara os cantos das linhas e traca a borda."""
+        c = self.canvas
+        r = min(r, (y1 - y0) / 2)
+        steps = 8
+        for cx, cy, a0 in ((x0 + r, y0 + r, 90), (x1 - r, y0 + r, 0),
+                           (x1 - r, y1 - r, 270), (x0 + r, y1 - r, 180)):
+            # canto de fora do arco pintado com o fundo (a linha do hover nao vaza)
+            corner_x = x0 if cx < (x0 + x1) / 2 else x1
+            corner_y = y0 if cy < (y0 + y1) / 2 else y1
+            pts = [corner_x, corner_y]
+            for k in range(steps + 1):
+                ang = math.radians(a0 + 90 * k / steps)
+                pts += [cx + r * math.cos(ang), cy - r * math.sin(ang)]
+            c.create_polygon(pts, fill=SURFACE, outline="")
+            c.create_arc(cx - r, cy - r, cx + r, cy + r, start=a0, extent=90,
+                         style="arc", outline=BORDER, width=1)
+        c.create_line(x0 + r, y0, x1 - r, y0, fill=BORDER)
+        c.create_line(x0 + r, y1, x1 - r, y1, fill=BORDER)
+        c.create_line(x0, y0 + r, x0, y1 - r, fill=BORDER)
+        c.create_line(x1, y0 + r, x1, y1 - r, fill=BORDER)
 
 
 class App:
@@ -3817,7 +3916,8 @@ class App:
             photo = tk.PhotoImage(file=str(png))
             root.iconphoto(True, photo)
             root._sussurro_icon = photo
-        root.geometry(f"760x{min(800, max(600, root.winfo_screenheight() - 80))}")
+        root.geometry(f"{min(1180, max(900, root.winfo_screenwidth() - 120))}x"
+                      f"{min(800, max(600, root.winfo_screenheight() - 80))}")
 
         self.settings = load_settings()
         self.devices = list_input_devices()
@@ -3844,202 +3944,142 @@ class App:
                 self.gestures.start()
 
         self.FONT_UI = pick_font(
-            ["Segoe UI", "Noto Sans", "DejaVu Sans", "Ubuntu", "Liberation Sans"],
+            ["Figtree", "Segoe UI", "Noto Sans", "DejaVu Sans", "Ubuntu", "Liberation Sans"],
             "TkDefaultFont",
         )
-        self.FONT_DISPLAY = pick_font(
-            ["Bahnschrift SemiBold Condensed", "Bahnschrift SemiBold", "Bahnschrift",
-             "Noto Sans Condensed", "DejaVu Sans"],
-            "Arial",
+        # pesos do Hub: 550 nos itens da lateral, 600 em titulo e botao
+        self.FONT_MED = pick_font(["Figtree Medium", "Segoe UI Semibold"], self.FONT_UI)
+        self.FONT_SEMI = pick_font(["Figtree SemiBold", "Segoe UI Semibold"], self.FONT_UI)
+        self.FONT_SERIF = pick_font(
+            ["EB Garamond", "Garamond", "Noto Serif", "Georgia", "Liberation Serif", "DejaVu Serif"],
+            "TkDefaultFont",
         )
+        self.FONT_DISPLAY = self.FONT_SEMI
         self.FONT_MONO = pick_font(
             ["Cascadia Mono", "JetBrains Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Ubuntu Mono"],
             "TkFixedFont",
         )
         root.configure(fg_color=BG)
-        PADX = self.PADX = 16
+        root.minsize(860, 560)
+        PADX = self.PADX = 40
+        root.grid_columnconfigure(1, weight=1)
+        root.grid_rowconfigure(0, weight=1)
 
-        # cabecalho: marca + modelo
-        header = ctk.CTkFrame(root, fg_color="transparent")
-        header.pack(fill="x", padx=PADX, pady=(14, 12))
-        icon_png = Path(__file__).with_name("assets") / "sussurro.png"
-        if icon_png.exists():
-            self._brand_img = ctk.CTkImage(Image.open(icon_png), size=(28, 28))
-            ctk.CTkLabel(header, image=self._brand_img, text="").pack(side="left")
-        ctk.CTkLabel(header, text="SUSSURRO", text_color=INK,
-                     font=(self.FONT_DISPLAY, 22)).pack(side="left", padx=(10, 0))
-        self.model_label = ctk.CTkLabel(header, text="Preparando modelo...", text_color=INK_3,
-                                        font=(self.FONT_MONO, 11))
-        self.model_label.pack(side="right")
+        # -- barra lateral: marca, navegacao, motor em uso, configuracoes ------
+        side = self.sidebar = ctk.CTkFrame(root, fg_color=BG, corner_radius=0, width=228)
+        side.grid(row=0, column=0, sticky="ns")
+        side.pack_propagate(False)
+        brand = ctk.CTkFrame(side, fg_color="transparent")
+        brand.pack(fill="x", padx=(21, 12), pady=(26, 22))
+        self._brand_img = ctk.CTkImage(icons.brand_image(INK, 44), size=icons.brand_image(INK, 22).size)
+        ctk.CTkLabel(brand, image=self._brand_img, text="").pack(side="left")
+        ctk.CTkLabel(brand, text="Sussurro", text_color=INK,
+                     font=self._font(21, "semibold")).pack(side="left", padx=(8, 0))
 
-        # faixa de comando: GRAVAR e o unico laranja da janela
-        cmd = self.command_bar = ctk.CTkFrame(root, fg_color="transparent")
-        cmd.pack(fill="x", padx=PADX, pady=(0, 12))
-        self.record_btn = ctk.CTkButton(
-            cmd, text="GRAVAR", command=self.toggle, state="disabled",
-            width=136, height=38, corner_radius=8,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            text_color=GRAPHITE, text_color_disabled=GRAPHITE,
-            font=(self.FONT_DISPLAY, 16))
-        self.record_btn.pack(side="left")
-        for label, cb in (("Copiar tudo", self.copy_all), ("Limpar", self.clear)):
-            self._secondary(cmd, label, cb, width=104, height=38).pack(side="left", padx=(8, 0))
+        self.tab_btns = {}
+        self._icon_imgs = {}
+        tabs = [("historico", "Ditado"), ("aovivo", "Ao vivo")]
+        if not IS_WIN:
+            tabs.append(("reuniao", "Reunião"))  # parec/pacat: PulseAudio ou PipeWire
+        tabs += [("estatisticas", "Estatísticas"), ("biblioteca", "Dicionário"),
+                 ("comparar", "Comparar")]
+        if self.gestures is not None:
+            tabs.append(("omarchy", "Omarchy"))
+        self.PAGE_TITLES = dict(tabs)
+        self.PAGE_TITLES["historico"] = "Bem-vindo de volta"
+        self.PAGE_TITLES["config"] = "Configurações"
 
-        # card de configuracao: grade 3 colunas, rotulos caixa alta discretos
-        card = self.config_card = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
-        card.pack(fill="x", padx=PADX, pady=(0, 12))
-        for col in range(3):
-            card.grid_columnconfigure(col, weight=1, uniform="cfg")
-        CPAD, GROUP = 16, 16   # margem interna do card; respiro entre grupos de linhas
+        def nav(master, name, label, **pack):
+            img = icons.icon_image(name, INK, 36, 1.7)
+            self._icon_imgs[name] = ctk.CTkImage(img, size=(18, 18))
+            btn = ctk.CTkButton(master, text=label, image=self._icon_imgs[name], compound="left",
+                                anchor="w", height=36, corner_radius=6, border_spacing=8,
+                                fg_color="transparent", hover_color=SURFACE_3, text_color=INK,
+                                font=self._font(15, "medium"),
+                                command=lambda n=name: self._show_tab(n))
+            btn.pack(fill="x", padx=(13, 11), pady=2, **pack)
+            self.tab_btns[name] = btn
+            return btn
 
-        def cfg_label(text, r, c):
-            ctk.CTkLabel(card, text=text, text_color=INK_3, anchor="w", height=14,
-                         font=(self.FONT_UI, 10, "bold")).grid(
-                row=r, column=c, sticky="ew", padx=CPAD, pady=((CPAD, 0) if r == 0 else (GROUP, 0)))
+        for name, label in tabs:
+            nav(side, name, label)
 
-        def combo(values, current, command, r, c):
-            box = ctk.CTkComboBox(card, values=values, command=command, state="readonly",
-                                  height=32, corner_radius=8,
-                                  fg_color=SURFACE_2, border_color=BORDER,
-                                  button_color=SURFACE_2, button_hover_color=SURFACE_3,
-                                  dropdown_fg_color=SURFACE_2, dropdown_hover_color=SURFACE_3,
-                                  dropdown_text_color=INK, text_color=INK,
-                                  font=(self.FONT_UI, 12))
-            box.set(current)
-            box.grid(row=r, column=c, sticky="ew", padx=CPAD, pady=(6, 0))
-            return box
-
-        cfg_label("ATALHO DO MOUSE", 0, 0)
-        cfg_label("AÇÃO", 0, 1)
-        cfg_label("MICROFONE", 0, 2)
-        hk = ctk.CTkFrame(card, fg_color="transparent")
-        hk.grid(row=1, column=0, sticky="ew", padx=CPAD, pady=(6, 0))
-        hk.grid_columnconfigure(0, weight=1)
-        self.hotkey_var = tk.StringVar(value=BUTTON_LABELS[self.settings["mouse_button"]])
-        ctk.CTkEntry(hk, textvariable=self.hotkey_var, state="readonly", height=32,
-                     corner_radius=8, fg_color=SURFACE_2, border_color=BORDER,
-                     text_color=INK, font=(self.FONT_UI, 12)).grid(row=0, column=0, sticky="ew")
-        self.set_hotkey_btn = self._secondary(hk, "Setar", self.capture_hotkey, width=60)
-        self.set_hotkey_btn.grid(row=0, column=1, padx=(6, 0))
-        self.trigger = combo(["alternar", "segurar"], self.settings["trigger_mode"],
-                             self._on_trigger, 1, 1)
-        self.mic_by_label = {device.label: device for device in self.devices.values()}
-        names = list(self.mic_by_label)
-        saved = self.settings["device_name"]
-        saved_device = self.devices.get(saved)
-        current_mic = saved_device.label if saved_device else (names[0] if names else "")
-        self.mic = combo(names, current_mic,
-                         self._on_mic, 1, 2)
-        cfg_label("TRANSCRIÇÃO", 2, 0)
-        cfg_label("ENVIO", 2, 1)
-        cfg_label("IDIOMA", 2, 2)
-        self.mode = combo(["simultaneo", "final"], self.settings["transcribe_mode"],
-                          self._on_mode, 3, 0)
-        self.inject = combo(["colar", "digitar"], self.settings["inject_method"],
-                            self._on_inject, 3, 1)
-        self.lang = combo(["pt", "en", "auto"], self.settings["language"],
-                          self._on_lang, 3, 2)
-
-        # 3a linha: fonte de captura (mic / audio do PC / os dois); o audio do PC e
-        # sempre a saida padrao do sistema
-        cfg_label("FONTE", 4, 0)
-        self.fonte = combo(["microfone", "audio do PC", "os dois"],
-                           CAPTURE_LABELS[self.settings["capture_mode"]],
-                           self._on_fonte, 5, 0)
-        cfg_label("O QUE ESTA ENTRADA FAZ", 4, 1)
-        self.mic_help = ctk.CTkLabel(
-            card, text="", text_color=INK_3, font=(self.FONT_UI, 11),
-            anchor="nw", justify="left", wraplength=700)
-        self.mic_help.grid(row=5, column=1, columnspan=2, sticky="new", padx=CPAD, pady=(8, 0))
-        self._update_mic_help()
-
-        # escolher ja troca o modelo; EM USO AGORA diz o que de fato transcreve o proximo
-        # trecho (inclusive quando a nuvem caiu e o Turbo local assumiu)
-        cfg_label("MODELO", 6, 0)
-        cfg_label("EXECUTAR EM", 6, 1)
-        cfg_label("EM USO AGORA", 6, 2)
-        self.model_choice = combo(list(MODEL_LABELS.values()),
-                                  MODEL_LABELS[self.settings["whisper_model"]],
-                                  lambda _: self._apply_model(), 7, 0)
-        self.device_choice = combo(list(self.device_labels.values()),
-                                   self.device_labels[self.settings["whisper_device"]],
-                                   lambda _: self._apply_model(), 7, 1)
-        for picker in (self.model_choice, self.device_choice):
-            picker.grid_configure(sticky="new")  # a linha de gasto embaixo nao empurra os combos
-        now_cell = ctk.CTkFrame(card, fg_color="transparent")
-        now_cell.grid(row=7, column=2, sticky="new", padx=CPAD, pady=(6, 0))
-        self.engine_now = ctk.CTkLabel(now_cell, text="● carregando o modelo...", height=32,
+        nav(side, "config", "Configurações", side="bottom", ipady=0).pack_configure(pady=(2, 14))
+        tk.Frame(side, bg=BORDER_STRONG, height=1, bd=0, highlightthickness=0).pack(
+            side="bottom", fill="x", padx=(13, 11), pady=(10, 6))
+        # cartao "em uso agora": o que transcreve o proximo trecho (inclusive quando a
+        # nuvem caiu e o Turbo local assumiu) e o gasto do mes com modelo de nuvem
+        now = ctk.CTkFrame(side, fg_color=WHITE, corner_radius=12, border_width=1,
+                           border_color=BORDER)
+        now.pack(side="bottom", fill="x", padx=(13, 11), pady=(0, 0))
+        ctk.CTkLabel(now, text="Em uso agora", text_color=INK, anchor="w",
+                     font=self._font(13, "semibold")).pack(fill="x", padx=16, pady=(14, 2))
+        now_cell = ctk.CTkFrame(now, fg_color="transparent")
+        now_cell.pack(fill="x", padx=16, pady=(0, 12))
+        self.engine_now = ctk.CTkLabel(now_cell, text="● carregando o modelo...",
                                        text_color=ENGINE_COLORS["aviso"], anchor="w",
-                                       justify="left", wraplength=340,
-                                       font=(self.FONT_UI, 12, "bold"))
+                                       justify="left", wraplength=168, font=self._font(13))
         self.engine_now.pack(fill="x")
-        # gasto do mes do provedor escolhido; some com modelo local
-        self.cloud_spend = ctk.CTkLabel(now_cell, text="", text_color=INK_3, anchor="w", height=14,
-                                        justify="left", wraplength=340, font=(self.FONT_UI, 11))
+        self.cloud_spend = ctk.CTkLabel(now_cell, text="", text_color=INK_3, anchor="w",
+                                        justify="left", wraplength=168, font=self._font(12))
         self._spend_shown = None
         self._engine_shown = None
-        self.sounds_var = tk.BooleanVar(value=bool(self.settings["feedback_sounds"]))
-        ctk.CTkSwitch(card, text="Sons de inicio, fim e erro", variable=self.sounds_var,
-                      command=self._on_sounds, text_color=INK_2,
-                      progress_color=ACCENT, font=(self.FONT_UI, 11)).grid(
-            row=9, column=0, columnspan=3, sticky="w", padx=CPAD, pady=(0, CPAD))
-        ctk.CTkLabel(card, text="Turbo e Large-v3 rodam no PC: nenhum áudio sai daqui. Large-v3 prioriza precisão.\n"
-                               "Nuvem (ElevenLabs, Grok) acerta mais termos e não ocupa VRAM, mas manda o áudio "
-                               "do ditado pro provedor.\nSe a nuvem cair, o trecho sai no Turbo local; reunião é sempre local.\n"
-                               + execution_hardware_note(self.hardware),
-                     text_color=INK_3, font=(self.FONT_UI, 11), anchor="w", justify="left").grid(
-            row=8, column=0, columnspan=3, sticky="ew", padx=CPAD, pady=(12, CPAD))
+        # rotulo do modelo carregado: o texto vive no cartao acima; fica pra quem o atualiza
+        self.model_label = ctk.CTkLabel(now, text="Preparando modelo...")
 
-        # abas: acento fica no GRAVAR; aba ativa marca por chapa mais clara
-        tabbar = self.tabbar = ctk.CTkFrame(root, fg_color="transparent")
-        tabbar.pack(fill="x", padx=PADX, pady=(0, 8))
-        self.tab_btns = {}
-        tabs = [("historico", "HISTÓRICO"), ("aovivo", "AO VIVO")]
-        if not IS_WIN:
-            tabs.append(("reuniao", "REUNIÃO"))  # parec/pacat: PulseAudio ou PipeWire
-        tabs += [("biblioteca", "BIBLIOTECA"), ("estatisticas", "ESTATÍSTICAS"),
-                 ("comparar", "COMPARAR")]
-        if self.gestures is not None:
-            tabs.append(("omarchy", "OMARCHY"))
-        tab_font = (self.FONT_DISPLAY, 12)  # sete abas cabem nos 760 px da janela
-        tab_measure = tkfont.Font(font=tab_font)
-        for name, label in tabs:
-            btn = ctk.CTkButton(tabbar, text=label, height=30, corner_radius=6,
-                                width=tab_measure.measure(label) + 16,
-                                fg_color="transparent", hover_color=SURFACE_2,
-                                text_color=INK_3, font=tab_font,
-                                command=lambda n=name: self._show_tab(n))
-            btn.pack(side="left", padx=(0, 2))
-            self.tab_btns[name] = btn
+        # -- cartao principal: titulo da pagina, acoes, conteudo, status --------
+        card = self.card = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=16,
+                                        border_width=1, border_color=BORDER)
+        card.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=10)
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=PADX, pady=(30, 18))
+        self.page_title = ctk.CTkLabel(head, text="", text_color=INK, anchor="w",
+                                       font=self._font(24, "semibold"))
+        self.page_title.pack(side="left")
+        cmd = self.command_bar = ctk.CTkFrame(head, fg_color="transparent")
+        self.record_btn = ctk.CTkButton(
+            cmd, text="Gravar", command=self.toggle, state="disabled",
+            width=104, height=38, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            text_color=GRAPHITE, text_color_disabled="#a8a7a2",
+            font=self._font(15, "semibold"))
+        for label, cb in (("Limpar", self.clear), ("Copiar tudo", self.copy_all)):
+            self._secondary(cmd, label, cb, height=38).pack(side="right", padx=(8, 0))
+        self.record_btn.pack(side="right", padx=(8, 0))
 
         # status empacotado antes do conteudo (side=bottom) pra nunca ser espremido pra fora
-        status_bar = ctk.CTkFrame(root, fg_color="transparent")
-        status_bar.pack(side="bottom", fill="x", padx=PADX, pady=(4, 10))
-        self.status = ctk.CTkLabel(status_bar, text="Iniciando...", text_color=INK_3,
-                                   anchor="w", font=(self.FONT_MONO, 11))
-        self.status.pack(side="left")
-        ctk.CTkLabel(status_bar, text="barra: arraste pelo meio para reposicionar", text_color=INK_3,
-                     font=(self.FONT_UI, 10)).pack(side="right")
+        self.status = ctk.CTkLabel(card, text="Iniciando...", text_color=INK_3, anchor="w",
+                                   font=self._font(13))
+        self.status.pack(side="bottom", fill="x", padx=PADX, pady=(6, 14))
 
-        # card de conteudo: historico / ao vivo
-        self.content = ctk.CTkFrame(root, fg_color=SURFACE, corner_radius=12)
+        self.content = ctk.CTkFrame(card, fg_color="transparent")
         self.content.pack(fill="both", expand=True, padx=PADX, pady=(0, 4))
+
+        # pagina Ditado: historico com a hora na coluna da esquerda + numeros na direita
+        self.home = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.home.grid_columnconfigure(0, weight=1)
+        self.home.grid_rowconfigure(0, weight=1)
         self._playing = None
         self.hist_frame = HistoryList(
-            self.content, font_mono=self.FONT_MONO, font_ui=self.FONT_UI,
+            self.home, font_mono=self.FONT_MONO, font_ui=self.FONT_UI, font_semi=self.FONT_SEMI,
             day_label=self._day_label, on_play=self._play, on_copy=self._copy_entry,
             on_retry=self._retry_entry)
+        self.hist_frame.grid(row=0, column=0, sticky="nsew")
         self._secondary(self.hist_frame, "Liberar espaço", self._prune_history_audio).grid(
-            row=1, column=0, columnspan=2, sticky="e", padx=14, pady=(4, 8))
-        self.text = ctk.CTkTextbox(self.content, fg_color="transparent", text_color=INK,
-                                   font=(self.FONT_UI, 13), wrap="word", border_width=0)
+            row=1, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        self._build_home_stats(self.home).grid(row=0, column=1, sticky="n", padx=(24, 0))
+
+        self.text = ctk.CTkTextbox(self.content, fg_color=WHITE, text_color=INK,
+                                   font=self._font(15), wrap="word", border_width=1,
+                                   border_color=BORDER, corner_radius=16, border_spacing=14)
         self.library = self.transcriber.library
         self.lib_tab = self._build_library_tab()
         self.stats_frame = ctk.CTkFrame(self.content, fg_color="transparent")
         self._stats_dirty = True   # so desenha quando a aba abrir
         self._geom_antes = None    # geometria de fora da aba ESTATISTICAS
-        self._tabs = {"historico": self.hist_frame, "aovivo": self.text,
-                      "biblioteca": self.lib_tab, "estatisticas": self.stats_frame}
+        self._tabs = {"historico": self.home, "aovivo": self.text,
+                      "biblioteca": self.lib_tab, "estatisticas": self.stats_frame,
+                      "config": self._build_settings_page()}
         if self.gestures is not None:
             self._tabs["omarchy"] = self._build_devices_tab()
         self.compare_panel = ComparisonPanel(self.content, self, StreamResampler)
@@ -4072,15 +4112,159 @@ class App:
         self._begin_model_load(dict(self.settings), persist=False)
         root.after(UI_POLL_MS, self._poll)
 
-    def _secondary(self, master, text, command, width=None, height=32, **kw):
-        """Botao neutro padrao: chapa sutil, borda fina, sem acento (o acento e do GRAVAR)."""
+    def _font(self, size, weight="regular"):
+        """Fonte em pixels (o CTk escala). Sem Figtree, os pesos viram negrito."""
+        family = {"regular": self.FONT_UI, "medium": self.FONT_MED,
+                  "semibold": self.FONT_SEMI}[weight]
+        if weight != "regular" and family == self.FONT_UI:
+            return (family, size, "bold")
+        return (family, size)
+
+    def _secondary(self, master, text, command, width=None, height=36, **kw):
+        """Botao neutro do Hub: chapa #eeebe3, sem borda, texto 15/600."""
         opts = dict(text=text, command=command, height=height, corner_radius=8,
-                    fg_color=SURFACE_2, hover_color=SURFACE_3, border_width=1,
-                    border_color=BORDER, text_color=INK_2, font=(self.FONT_UI, 12))
-        if width is not None:
-            opts["width"] = width
+                    width=40 if width is None else width, border_spacing=12,
+                    fg_color=SURFACE_3, hover_color=SURFACE_4, border_width=0,
+                    text_color=INK, text_color_disabled=INK_3, font=self._font(15, "semibold"))
         opts.update(kw)
         return ctk.CTkButton(master, **opts)
+
+    def _combo(self, master, values, current, command, width=220):
+        """Dropdown do Hub: branco, borda fina, cantos de 8."""
+        box = ctk.CTkComboBox(master, values=values, command=command, state="readonly",
+                              width=width, height=38, corner_radius=8, border_width=1,
+                              fg_color=WHITE, border_color=BORDER_STRONG,
+                              button_color=WHITE, button_hover_color=SURFACE_3,
+                              dropdown_fg_color=WHITE, dropdown_hover_color=SURFACE_3,
+                              dropdown_text_color=INK, text_color=INK,
+                              font=self._font(14), dropdown_font=self._font(14))
+        box.set(current)
+        return box
+
+    # -- pagina Ditado: cartao de numeros ao lado do historico ----------------
+    def _build_home_stats(self, master):
+        box = ctk.CTkFrame(master, fg_color=SURFACE_2, corner_radius=16, width=250)
+        self._home_nums = {}
+        top = ctk.CTkFrame(box, fg_color="transparent")
+        top.pack(fill="x", padx=24, pady=(20, 18))
+        for key in ("palavras", "ppm", "streak"):
+            row = ctk.CTkFrame(top, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            num = ctk.CTkLabel(row, text="0", text_color=INK, anchor="w",
+                               font=(self.FONT_SERIF, 30))
+            num.pack(side="left")
+            lab = ctk.CTkLabel(row, text="", text_color=INK, anchor="w", font=self._font(16))
+            lab.pack(side="left", padx=(8, 0), pady=(6, 0))
+            self._home_nums[key] = (num, lab)
+        tk.Frame(box, bg=BORDER_STRONG, height=1, bd=0, highlightthickness=0).pack(fill="x")
+        bottom = ctk.CTkFrame(box, fg_color="transparent")
+        bottom.pack(fill="x", padx=24, pady=(18, 22))
+        ctk.CTkLabel(bottom, text="Tempo poupado", text_color=INK, anchor="w",
+                     font=self._font(17, "semibold")).pack(fill="x")
+        self._home_saved = ctk.CTkLabel(bottom, text="", text_color=INK_2, anchor="w",
+                                        justify="left", wraplength=200, font=self._font(15))
+        self._home_saved.pack(fill="x", pady=(2, 0))
+        return box
+
+    def _render_home_stats(self):
+        if not getattr(self, "_home_nums", None):
+            return
+        st = compute_stats(self.entries)
+        valores = {
+            "palavras": (fmt_compact(st["palavras"]), "palavras"),
+            "ppm": (fmt_int(st["ppm"]), "ppm"),
+            "streak": (str(st["streak"]), "dia seguido" if st["streak"] == 1 else "dias seguidos"),
+        }
+        for key, (num, lab) in self._home_nums.items():
+            valor, rotulo = valores[key]
+            num.configure(text=valor)
+            lab.configure(text=rotulo)
+        self._home_saved.configure(
+            text=f"{fmt_dur(st['economia'])} a menos que digitando a {TYPING_WPM} palavras/min"
+            if st["palavras"] else "Os números aparecem depois do primeiro ditado.")
+
+    # -- pagina Configuracoes: linhas com titulo, descricao e controle --------
+    def _build_settings_page(self):
+        page = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        card = ctk.CTkFrame(page, fg_color=SURFACE_2, corner_radius=16)
+        card.pack(fill="x", pady=(0, 16))
+        card.grid_columnconfigure(0, weight=1)
+        rows = []
+
+        def row(title, desc=None, var=None):
+            r = len(rows) * 2
+            if rows:  # separador entre linhas, recuado como no Hub
+                tk.Frame(card, bg=BORDER_STRONG, height=1, bd=0, highlightthickness=0).grid(
+                    row=r - 1, column=0, columnspan=2, sticky="ew", padx=20)
+            cell = ctk.CTkFrame(card, fg_color="transparent")
+            cell.grid(row=r, column=0, sticky="ew", padx=(20, 12), pady=18)
+            ctk.CTkLabel(cell, text=title, text_color=INK, anchor="w",
+                         font=self._font(15, "semibold")).pack(fill="x")
+            lab = None
+            if desc is not None or var is not None:
+                lab = ctk.CTkLabel(cell, text=desc or "", textvariable=var, text_color=INK_2,
+                                   anchor="w", justify="left", wraplength=440,
+                                   font=self._font(15))
+                lab.pack(fill="x", pady=(4, 0))
+            rows.append(cell)
+            return r, lab
+
+        def place(widget, r):
+            widget.grid(row=r, column=1, sticky="e", padx=(0, 20), pady=18)
+            return widget
+
+        self.hotkey_var = tk.StringVar(value=BUTTON_LABELS[self.settings["mouse_button"]])
+        r, _ = row("Atalho do mouse", var=self.hotkey_var)
+        self.set_hotkey_btn = place(self._secondary(card, "Alterar", self.capture_hotkey,
+                                                    width=164), r)
+        r, _ = row("Ação do atalho",
+                   "Alternar: um clique liga, outro desliga. Segurar: grava enquanto o botão "
+                   "estiver apertado.")
+        self.trigger = place(self._combo(card, ["alternar", "segurar"],
+                                         self.settings["trigger_mode"], self._on_trigger), r)
+        self.mic_by_label = {device.label: device for device in self.devices.values()}
+        names = list(self.mic_by_label)
+        saved_device = self.devices.get(self.settings["device_name"])
+        current_mic = saved_device.label if saved_device else (names[0] if names else "")
+        r, self.mic_help = row("Microfone", "")
+        self.mic = place(self._combo(card, names, current_mic, self._on_mic, width=260), r)
+        self._update_mic_help()
+        r, _ = row("Fonte", "O que o ditado escuta. O áudio do PC é sempre a saída padrão "
+                            "do sistema.")
+        self.fonte = place(self._combo(card, ["microfone", "audio do PC", "os dois"],
+                                       CAPTURE_LABELS[self.settings["capture_mode"]],
+                                       self._on_fonte), r)
+        r, _ = row("Transcrição", "Simultâneo escreve enquanto você fala; final transcreve "
+                                  "tudo ao terminar.")
+        self.mode = place(self._combo(card, ["simultaneo", "final"],
+                                      self.settings["transcribe_mode"], self._on_mode), r)
+        r, _ = row("Envio", "Colar usa a área de transferência; digitar simula o teclado.")
+        self.inject = place(self._combo(card, ["colar", "digitar"],
+                                        self.settings["inject_method"], self._on_inject), r)
+        r, _ = row("Idioma", "Português, inglês ou detecção automática.")
+        self.lang = place(self._combo(card, ["pt", "en", "auto"], self.settings["language"],
+                                      self._on_lang), r)
+        r, _ = row("Modelo", "Turbo e Large-v3 rodam no PC e nenhum áudio sai daqui. A nuvem "
+                             "(ElevenLabs, Grok) acerta mais termos, mas manda o áudio do "
+                             "ditado pro provedor. Se ela cair, o trecho sai no Turbo local.")
+        self.model_choice = place(self._combo(card, list(MODEL_LABELS.values()),
+                                              MODEL_LABELS[self.settings["whisper_model"]],
+                                              lambda _: self._apply_model(), width=260), r)
+        r, _ = row("Executar em", execution_hardware_note(self.hardware))
+        self.device_choice = place(self._combo(card, list(self.device_labels.values()),
+                                               self.device_labels[self.settings["whisper_device"]],
+                                               lambda _: self._apply_model(), width=260), r)
+        self.sounds_var = tk.BooleanVar(value=bool(self.settings["feedback_sounds"]))
+        r, _ = row("Sons", "Toque curto ao começar, terminar e quando algo dá errado.")
+        place(ctk.CTkSwitch(card, text="", variable=self.sounds_var, command=self._on_sounds,
+                            width=44, switch_width=40, switch_height=22,
+                            fg_color=BORDER_STRONG, progress_color=INK,
+                            button_color=WHITE, button_hover_color=WHITE), r)
+        ctk.CTkLabel(page, text="A barra de gravação pode ser arrastada pelo meio para outro "
+                                "lugar. Reunião transcreve sempre no PC.",
+                     text_color=INK_3, anchor="w", justify="left", wraplength=640,
+                     font=self._font(13)).pack(fill="x", padx=4)
+        return page
 
     def _close(self):
         # fechar a janela (Super+W, X) encerra o app, como qualquer programa
@@ -4117,14 +4301,6 @@ class App:
             self._geom_antes = None
         if name == self._tab:
             return
-        # abas de tela cheia: sem a faixa do GRAVAR e sem o card de configuracao do ditado
-        full = ("comparar", "reuniao")
-        if name in full and self._tab not in full:
-            self.command_bar.pack_forget()
-            self.config_card.pack_forget()
-        elif name not in full and self._tab in full:
-            self.config_card.pack(fill="x", padx=self.PADX, pady=(0, 12), before=self.tabbar)
-            self.command_bar.pack(fill="x", padx=self.PADX, pady=(0, 12), before=self.config_card)
         if self.meeting_panel is not None:
             if name == "reuniao":
                 self.meeting_panel.shown()
@@ -4132,14 +4308,19 @@ class App:
                 self.meeting_panel.hidden()
         self._tab = name
         for n, btn in self.tab_btns.items():
-            if n == name:
-                btn.configure(fg_color=SURFACE_3, text_color=INK, hover_color=SURFACE_3)
-            else:
-                btn.configure(fg_color="transparent", text_color=INK_3, hover_color=SURFACE_2)
+            btn.configure(fg_color=SURFACE_3 if n == name else "transparent")
+        # Configuracoes leva titulo serifado, como o painel de ajustes do Hub
+        self.page_title.configure(
+            text=self.PAGE_TITLES.get(name, name),
+            font=(self.FONT_SERIF, 34) if name == "config" else self._font(24, "semibold"))
+        if name in ("historico", "aovivo"):
+            self.command_bar.pack(side="right")
+        else:
+            self.command_bar.pack_forget()
         for n, widget in self._tabs.items():
             if n != name:
                 widget.pack_forget()
-        self._tabs[name].pack(fill="both", expand=True, padx=6, pady=6)
+        self._tabs[name].pack(fill="both", expand=True)
         if name == "estatisticas":
             self._fit_stats_window()
         if name == "omarchy":
@@ -4157,12 +4338,18 @@ class App:
 
     @staticmethod
     def _day_label(dt: datetime) -> str:
-        return "HOJE" if dt.date() == date.today() else dt.strftime("%d/%m/%Y")
+        dias = (date.today() - dt.date()).days
+        if dias == 0:
+            return "HOJE"
+        if dias == 1:
+            return "ONTEM"
+        return dt.strftime("%d/%m/%Y")
 
     def _render_history(self):
         shown = [{**entry, "audio_removed": not (HISTORY_DIR / entry["wav"]).is_file()}
                  for entry in self.entries[:HIST_RENDER_MAX]]
         self.hist_frame.set_entries(shown)
+        self._render_home_stats()
 
     def _add_history(self, entry: dict):
         for i, current in enumerate(self.entries):
@@ -4290,24 +4477,24 @@ class App:
         self.root.geometry(f"{largura}x{altura}+{x}+{y}")
 
     def _stat_card(self, parent, rotulo: str, valor: str, nota: str, row: int, col: int):
-        card = ctk.CTkFrame(parent, fg_color=SURFACE_2, corner_radius=10)
+        card = ctk.CTkFrame(parent, fg_color=SURFACE_2, corner_radius=16)
         card.grid(row=row, column=col, sticky="nsew",
-                  padx=(0 if col == 0 else 8, 0), pady=(0, 8))
-        ctk.CTkLabel(card, text=rotulo, text_color=INK_3, anchor="w", height=12,
-                     font=(self.FONT_UI, 9, "bold")).pack(fill="x", padx=12, pady=(10, 0))
+                  padx=(0 if col == 0 else 12, 0), pady=(0, 12))
+        ctk.CTkLabel(card, text=rotulo, text_color=INK_3, anchor="w",
+                     font=self._font(13, "semibold")).pack(fill="x", padx=18, pady=(14, 0))
         ctk.CTkLabel(card, text=valor, text_color=INK, anchor="w",
-                     font=(self.FONT_DISPLAY, 25)).pack(fill="x", padx=12, pady=(1, 0))
-        ctk.CTkLabel(card, text=nota, text_color=INK_3, anchor="w", height=12,
-                     font=(self.FONT_UI, 10)).pack(fill="x", padx=12, pady=(0, 10))
+                     font=(self.FONT_SERIF, 30)).pack(fill="x", padx=18, pady=(0, 0))
+        ctk.CTkLabel(card, text=nota, text_color=INK_3, anchor="w", justify="left",
+                     wraplength=150, font=self._font(12)).pack(fill="x", padx=18, pady=(0, 14))
 
     def _stats_titulo(self, parent, texto: str, nota: str = ""):
         head = ctk.CTkFrame(parent, fg_color="transparent")
-        head.pack(fill="x", padx=12, pady=(10, 2))
-        ctk.CTkLabel(head, text=texto, text_color=INK_3, height=12,
-                     font=(self.FONT_UI, 9, "bold")).pack(side="left")
+        head.pack(fill="x", padx=18, pady=(14, 4))
+        ctk.CTkLabel(head, text=texto, text_color=INK,
+                     font=self._font(15, "semibold")).pack(side="left")
         if nota:
-            ctk.CTkLabel(head, text=nota, text_color=INK_3, height=12,
-                         font=(self.FONT_UI, 10)).pack(side="right")
+            ctk.CTkLabel(head, text=nota, text_color=INK_3,
+                         font=self._font(13)).pack(side="right", padx=(12, 0))
 
     def _render_cloud_spend(self):
         """Linha de gasto na nuvem: aparece depois do primeiro ditado na nuvem."""
@@ -4325,10 +4512,10 @@ class App:
         else:
             saldo = ("—", ledger.balance_error or "buscando...")
         cards = (
-            ("ELEVENLABS ESTE MÊS", f"{fmt_credits(el['credits'])} créditos",
+            ("ElevenLabs este mês", f"{fmt_credits(el['credits'])} créditos",
              f"{fmt_usd(el['usd'])} · {fmt_minutes(el['audio_s'])} em {el['calls']} pedidos"),
-            ("SALDO ELEVENLABS", *saldo),
-            ("GROK ESTE MÊS", fmt_minutes(grok["audio_s"]),
+            ("Saldo ElevenLabs", *saldo),
+            ("Grok este mês", fmt_minutes(grok["audio_s"]),
              f"{grok['calls']} pedidos · a xAI não informa custo"),
         )
         grade = ctk.CTkFrame(self.stats_frame, fg_color="transparent")
@@ -4345,8 +4532,8 @@ class App:
         self._stats_dirty = False
         if not self.entries:
             ctk.CTkLabel(self.stats_frame, text="Nenhum ditado ainda — grave alguma coisa "
-                         "e os numeros aparecem aqui.", text_color=INK_3,
-                         font=(self.FONT_UI, 12)).pack(anchor="w", padx=10, pady=10)
+                         "e os números aparecem aqui.", text_color=INK_3,
+                         font=self._font(15)).pack(anchor="w", padx=10, pady=10)
             return
         st = compute_stats(self.entries)
 
@@ -4354,16 +4541,16 @@ class App:
         grade.pack(fill="x")
         media = st["segundos"] / st["ditados"]
         cards = (
-            ("PALAVRAS DITADAS", fmt_int(st["palavras"]),
+            ("Palavras ditadas", fmt_int(st["palavras"]),
              f"maior: {fmt_int(st['maior_ditado'])} palavras"),
-            ("PALAVRAS POR MINUTO", fmt_int(st["ppm"]),
+            ("Palavras por minuto", fmt_int(st["ppm"]),
              f"melhor: {fmt_int(st['melhor_ppm'])} ppm"),
-            ("SEQUENCIA", fmt_dias(st["streak"]), f"recorde: {fmt_dias(st['recorde'])}"),
-            ("TEMPO FALADO", fmt_dur(st["segundos"]),
+            ("Sequência", fmt_dias(st["streak"]), f"recorde: {fmt_dias(st['recorde'])}"),
+            ("Tempo falado", fmt_dur(st["segundos"]),
              f"{fmt_int(st['ditados'])} ditados, media de {fmt_dur(media)}"),
-            ("ECONOMIA VS DIGITAR", fmt_dur(st["economia"]),
+            ("Economia vs digitar", fmt_dur(st["economia"]),
              f"teclado a {TYPING_WPM} palavras/min"),
-            ("CORRECOES DA BIBLIOTECA", fmt_int(st["correcoes"]),
+            ("Correções do dicionário", fmt_int(st["correcoes"]),
              f"{len(self.library.entries)} termos na lista" if st["correcoes"]
              else "comeca a contar nesta versao"),
         )
@@ -4379,40 +4566,40 @@ class App:
         baixo.pack(fill="both", expand=True)
         baixo.grid_rowconfigure(0, weight=1)
         baixo.grid_columnconfigure(2, weight=1)  # a lista de palavras pega a sobra
-        mapa = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=10)
-        mapa.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
-        self._stats_titulo(mapa, "ATIVIDADE", f"{fmt_dias(len(st['por_dia']))} com ditado")
+        mapa = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=16)
+        mapa.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
+        self._stats_titulo(mapa, "Atividade", f"{fmt_dias(len(st['por_dia']))} com ditado")
         img, tam = render_heatmap(st["por_dia"])
         self._heat_img = ctk.CTkImage(img, size=tam)
-        ctk.CTkLabel(mapa, image=self._heat_img, text="").pack(anchor="w", padx=12)
+        ctk.CTkLabel(mapa, image=self._heat_img, text="").pack(anchor="w", padx=18)
         legenda = ctk.CTkFrame(mapa, fg_color="transparent")
-        legenda.pack(anchor="w", padx=12, pady=(4, 12))
+        legenda.pack(anchor="w", padx=18, pady=(4, 14))
         img_leg, tam_leg = render_legend()
         self._leg_img = ctk.CTkImage(img_leg, size=tam_leg)
         ctk.CTkLabel(legenda, text="menos", text_color=INK_3, height=12,
-                     font=(self.FONT_UI, 10)).pack(side="left", padx=(26, 6))
+                     font=self._font(12)).pack(side="left", padx=(26, 6))
         ctk.CTkLabel(legenda, image=self._leg_img, text="").pack(side="left")
         ctk.CTkLabel(legenda, text="mais", text_color=INK_3, height=12,
-                     font=(self.FONT_UI, 10)).pack(side="left", padx=(6, 0))
+                     font=self._font(12)).pack(side="left", padx=(6, 0))
 
-        horas = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=10)
-        horas.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        horas = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=16)
+        horas.grid(row=0, column=1, sticky="nsew", padx=(12, 0), pady=(0, 12))
         pico = max(st["por_hora"], key=st["por_hora"].get)
-        self._stats_titulo(horas, "POR HORA DO DIA", f"pico as {pico}h")
+        self._stats_titulo(horas, "Por hora do dia", f"pico as {pico}h")
         img_h, tam_h = render_hours(st["por_hora"])
         self._hours_img = ctk.CTkImage(img_h, size=tam_h)
-        ctk.CTkLabel(horas, image=self._hours_img, text="").pack(padx=12, pady=(2, 12))
+        ctk.CTkLabel(horas, image=self._hours_img, text="").pack(padx=18, pady=(2, 14))
 
-        top = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=10)
-        top.grid(row=0, column=2, sticky="nsew", padx=(8, 0), pady=(0, 8))
-        self._stats_titulo(top, "PALAVRAS MAIS DITADAS")  # sem nota: a coluna e estreita
+        top = ctk.CTkFrame(baixo, fg_color=SURFACE_2, corner_radius=16)
+        top.grid(row=0, column=2, sticky="nsew", padx=(12, 0), pady=(0, 12))
+        self._stats_titulo(top, "Mais ditadas")  # sem nota: a coluna e estreita
         for palavra, vezes in st["top"]:
             linha = ctk.CTkFrame(top, fg_color="transparent")
-            linha.pack(fill="x", padx=12)
-            ctk.CTkLabel(linha, text=palavra, text_color=INK_2, anchor="w", height=15,
-                         font=(self.FONT_UI, 12)).pack(side="left")
-            ctk.CTkLabel(linha, text=fmt_int(vezes), text_color=INK_3, anchor="e", height=15,
-                         font=(self.FONT_MONO, 11)).pack(side="right")
+            linha.pack(fill="x", padx=18)
+            ctk.CTkLabel(linha, text=palavra, text_color=INK, anchor="w", height=20,
+                         font=self._font(14)).pack(side="left")
+            ctk.CTkLabel(linha, text=fmt_int(vezes), text_color=INK_3, anchor="e", height=20,
+                         font=self._font(13)).pack(side="right")
         ctk.CTkLabel(top, text="", height=6).pack()
         if self._tab == "estatisticas":  # ditado novo chegou com a aba aberta
             self._fit_stats_window()
@@ -4421,51 +4608,53 @@ class App:
     def _build_library_tab(self):
         wrap = ctk.CTkFrame(self.content, fg_color="transparent")
         form = ctk.CTkFrame(wrap, fg_color="transparent")
-        form.pack(fill="x", padx=2, pady=(2, 8))
+        form.pack(fill="x", pady=(0, 8))
         form.grid_columnconfigure(0, weight=3)
         form.grid_columnconfigure(1, weight=2)
-        ctk.CTkLabel(form, text="SAI ASSIM (separe variantes por virgula)", text_color=INK_3,
-                     anchor="w", height=14, font=(self.FONT_UI, 10, "bold")).grid(
-            row=0, column=0, sticky="ew", padx=(6, 0))
-        ctk.CTkLabel(form, text="DEVE VIRAR", text_color=INK_3, anchor="w", height=14,
-                     font=(self.FONT_UI, 10, "bold")).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ctk.CTkLabel(form, text="Sai assim (separe variantes por vírgula)", text_color=INK_3,
+                     anchor="w", font=self._font(13, "semibold")).grid(
+            row=0, column=0, sticky="ew", padx=(2, 0))
+        ctk.CTkLabel(form, text="Deve virar", text_color=INK_3, anchor="w",
+                     font=self._font(13, "semibold")).grid(row=0, column=1, sticky="ew", padx=(10, 0))
 
         def field(placeholder, col):
-            e = ctk.CTkEntry(form, placeholder_text=placeholder, height=32, corner_radius=8,
-                             fg_color=SURFACE_2, border_color=BORDER, text_color=INK,
-                             placeholder_text_color=INK_3, font=(self.FONT_UI, 12))
-            e.grid(row=1, column=col, sticky="ew", padx=(6 if col == 0 else 8, 0), pady=(4, 0))
+            e = ctk.CTkEntry(form, placeholder_text=placeholder, height=38, corner_radius=8,
+                             border_width=1, fg_color=WHITE, border_color=BORDER_STRONG,
+                             text_color=INK, placeholder_text_color=INK_3, font=self._font(15))
+            e.grid(row=1, column=col, sticky="ew", padx=(0 if col == 0 else 10, 0), pady=(6, 0))
             e.bind("<Return>", lambda _ev: self._lib_add())
             return e
 
         self.lib_wrong = field("grock, groque, grote", 0)
         self.lib_right = field("Grok", 1)
-        self._secondary(form, "Adicionar", self._lib_add, width=96).grid(
-            row=1, column=2, padx=(8, 6), pady=(4, 0))
-        self.lib_list = ctk.CTkScrollableFrame(wrap, fg_color="transparent")
-        self.lib_list.pack(fill="both", expand=True)
+        self._secondary(form, "Adicionar", self._lib_add, height=38).grid(
+            row=1, column=2, padx=(10, 0), pady=(6, 0))
+        self.lib_list = ctk.CTkScrollableFrame(wrap, fg_color=WHITE, corner_radius=16,
+                                               border_width=1, border_color=BORDER)
+        self.lib_list.pack(fill="both", expand=True, pady=(8, 0))
         return wrap
 
     def _render_library(self):
         for child in self.lib_list.winfo_children():
             child.destroy()
         if not self.library.entries:
-            ctk.CTkLabel(self.lib_list, text="Nenhuma palavra na biblioteca ainda.",
-                         text_color=INK_3, font=(self.FONT_UI, 12)).pack(anchor="w", padx=10, pady=10)
+            ctk.CTkLabel(self.lib_list, text="Nenhuma palavra no dicionário ainda.",
+                         text_color=INK_3, font=self._font(15)).pack(anchor="w", padx=16, pady=14)
             return
         for i, entry in enumerate(self.library.entries):
-            row = ctk.CTkFrame(self.lib_list, fg_color="transparent", corner_radius=8)
-            row.pack(fill="x", padx=2, pady=1)
+            if i:
+                tk.Frame(self.lib_list, bg=BORDER, height=1, bd=0, highlightthickness=0).pack(fill="x")
+            row = ctk.CTkFrame(self.lib_list, fg_color="transparent", corner_radius=0)
+            row.pack(fill="x")
             ctk.CTkButton(row, text="✕", command=lambda n=i: self._lib_remove(n),
-                          width=28, height=26, corner_radius=6, fg_color="transparent",
+                          width=30, height=30, corner_radius=6, fg_color="transparent",
                           hover_color=SURFACE_3, text_color=INK_3,
-                          font=(self.FONT_UI, 12)).pack(
-                side="right", anchor="n", padx=(6, 8), pady=5)
-            ctk.CTkLabel(row, text=entry["certo"], text_color=INK, width=130, anchor="w",
-                         font=(self.FONT_UI, 12, "bold")).pack(side="left", padx=(10, 6), pady=6)
-            ctk.CTkLabel(row, text="⟵  " + ", ".join(entry["erros"]), text_color=INK_3,
-                         anchor="w", justify="left", wraplength=380,
-                         font=(self.FONT_UI, 12)).pack(side="left", fill="x", expand=True, pady=6)
+                          font=self._font(13)).pack(side="right", anchor="n", padx=(6, 10), pady=10)
+            ctk.CTkLabel(row, text=entry["certo"], text_color=INK, width=150, anchor="w",
+                         font=self._font(15, "semibold")).pack(side="left", padx=(16, 8), pady=14)
+            ctk.CTkLabel(row, text=", ".join(entry["erros"]), text_color=INK_3,
+                         anchor="w", justify="left", wraplength=420,
+                         font=self._font(15)).pack(side="left", fill="x", expand=True, pady=14)
 
     def _lib_add(self):
         certo = self.lib_right.get().strip()
@@ -4493,16 +4682,16 @@ class App:
     def _build_devices_tab(self):
         g = self.gestures
         wrap = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
-        ctk.CTkLabel(wrap, text=f"GESTOS DO HEADSET · {g.profile.label.upper()}", text_color=INK,
-                     anchor="w", font=(self.FONT_DISPLAY, 16)).pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(wrap, text=f"Gestos do headset · {g.profile.label}", text_color=INK,
+                     anchor="w", font=self._font(17, "semibold")).pack(fill="x", padx=2, pady=(0, 0))
         ctk.CTkLabel(wrap, text=("Aciona o Sussurro pelo fone, sem tocar no PC: gire a roda de volume "
                                  "pra cima e pra baixo rapido, ou de um toque duplo no mute. "
                                  "Ao terminar de colar, o Sussurro aperta Enter."),
-                     text_color=INK_3, anchor="w", justify="left", wraplength=620,
-                     font=(self.FONT_UI, 12)).pack(fill="x", padx=8, pady=(2, 8))
+                     text_color=INK_2, anchor="w", justify="left", wraplength=620,
+                     font=self._font(15)).pack(fill="x", padx=2, pady=(4, 12))
 
         # status: fone / acesso / mic do fone / mic padrao
-        st = ctk.CTkFrame(wrap, fg_color=SURFACE_2, corner_radius=10)
+        st = ctk.CTkFrame(wrap, fg_color=SURFACE_2, corner_radius=16)
         st.pack(fill="x", padx=6, pady=(0, 8))
         self.dev_status_labels = {}
         for key, title in (("headset", "FONE"), ("access", "ACESSO AOS BOTOES"),
@@ -4532,8 +4721,8 @@ class App:
         for i, (key, label) in enumerate(self.dev_switch_labels.items()):
             var = tk.BooleanVar(value=bool(self.devcfg.get(key)))
             ctk.CTkSwitch(sw, text=label, variable=var, command=lambda k=key: self._on_dev_switch(k),
-                          progress_color=ACCENT, button_color=INK_2, button_hover_color=INK,
-                          text_color=INK, font=(self.FONT_UI, 12)).grid(
+                          fg_color=BORDER_STRONG, progress_color=INK, button_color=WHITE,
+                          button_hover_color=WHITE, text_color=INK, font=self._font(15)).grid(
                 row=i // 2, column=i % 2, sticky="w", padx=8, pady=6)
             self.dev_switches[key] = var
 
@@ -4548,8 +4737,8 @@ class App:
             ctk.CTkLabel(pr, text=title, text_color=INK_3, anchor="w",
                          font=(self.FONT_UI, 10, "bold")).grid(row=row, column=0, sticky="w",
                                                                 padx=(8, 10), pady=4)
-            sl = ctk.CTkSlider(pr, from_=lo, to=hi, number_of_steps=steps, progress_color=ACCENT,
-                               button_color=INK_2, button_hover_color=INK,
+            sl = ctk.CTkSlider(pr, from_=lo, to=hi, number_of_steps=steps, progress_color=INK,
+                               fg_color=BORDER_STRONG, button_color=INK, button_hover_color=INK_2,
                                command=lambda v, k=key, f=fmt: self._on_dev_param(k, v, f))
             sl.set(float(self.devcfg.get(key)))
             sl.grid(row=row, column=1, sticky="ew", pady=4)
@@ -4573,10 +4762,10 @@ class App:
                    else self.dev_source_labels[0])
         self.dev_fallback = ctk.CTkComboBox(
             pr, values=self.dev_source_labels, command=self._on_dev_fallback, state="readonly",
-            height=30, corner_radius=8, fg_color=SURFACE_2, border_color=BORDER,
-            button_color=SURFACE_2, button_hover_color=SURFACE_3, dropdown_fg_color=SURFACE_2,
+            height=38, corner_radius=8, border_width=1, fg_color=WHITE, border_color=BORDER_STRONG,
+            button_color=WHITE, button_hover_color=SURFACE_3, dropdown_fg_color=WHITE,
             dropdown_hover_color=SURFACE_3, dropdown_text_color=INK, text_color=INK,
-            font=(self.FONT_UI, 12))
+            font=self._font(14))
         self.dev_fallback.set(current)
         self.dev_fallback.grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=(4, 4))
 
@@ -4584,7 +4773,7 @@ class App:
         ctk.CTkLabel(wrap, text="EVENTOS", text_color=INK_3, anchor="w",
                      font=(self.FONT_UI, 10, "bold")).pack(fill="x", padx=14, pady=(8, 0))
         self.dev_feed = ctk.CTkTextbox(wrap, fg_color=SURFACE_2, text_color=INK_2,
-                                       font=(self.FONT_MONO, 11), height=150, corner_radius=10,
+                                       font=(self.FONT_MONO, 12), height=150, corner_radius=16,
                                        border_width=0)
         self.dev_feed.pack(fill="x", padx=6, pady=(4, 8))
         self.dev_feed.configure(state="disabled")
@@ -4771,7 +4960,7 @@ class App:
             self.bar.flash("error", f"ERRO ao abrir {alvo}: {e}", 2000)
             self._sound("error")
             return False
-        self.record_btn.configure(text="PARAR")
+        self.record_btn.configure(text="Parar")
         self.bar.show("rec")
         self._sound("start")
         return True
@@ -4781,7 +4970,7 @@ class App:
             return  # ja parado (ex.: confirmou na barra e soltou o atalho depois)
         self.transcriber.stop()
         self.hotkey.active = False  # parar pela UI nao pode deixar o atalho invertido
-        self.record_btn.configure(text="GRAVAR")
+        self.record_btn.configure(text="Gravar")
         self.bar.show("proc")
         self._sound("stop")
 
@@ -4789,7 +4978,7 @@ class App:
         """X da barra: joga a sessao fora — nao transcreve, nao cola, nao arquiva."""
         self.transcriber.cancel(from_processing=True)
         self.hotkey.active = False
-        self.record_btn.configure(text="GRAVAR")
+        self.record_btn.configure(text="Gravar")
         self.bar.hide()
 
     def toggle(self):
@@ -5015,7 +5204,8 @@ if __name__ == "__main__":
         # identidade propria na taskbar: sem isto o Windows agrupa sob o pythonw
         # generico e mostra o icone do Python em vez do sussurro.ico da janela
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Lucas.Sussurro")
-    ctk.set_appearance_mode("dark")
+    ctk.set_appearance_mode("light")
+    register_bundled_fonts()
     # className no Linux casa com StartupWMClass=Sussurro do .desktop (no Windows o
     # AppUserModelID ja cuida do agrupamento na taskbar).
     root = ctk.CTk() if IS_WIN else ctk.CTk(className="Sussurro")

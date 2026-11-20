@@ -62,7 +62,7 @@ O Tk que vem com o CPython do `uv` (python-build-standalone) é compilado **sem 
 
 ## Omarchy / Hyprland
 
-No Omarchy a barra de gravação segue o monitor do cursor e ganha cantos recortados pelo compositor, e a aba **OMARCHY** aciona o ditado pelo headset MCHOSE X9 sem tocar no PC (roda de volume invertida rápido ou toque duplo no mute, com Enter automático ao terminar). Regras de janela, regra udev e instruções em [`contrib/omarchy/`](contrib/omarchy/README.md).
+No Omarchy a barra de gravação segue o monitor do cursor e ganha cantos recortados pelo compositor, e a página **Omarchy** aciona o ditado pelo headset MCHOSE X9 sem tocar no PC (roda de volume invertida rápido ou toque duplo no mute, com Enter automático ao terminar). Regras de janela, regra udev e instruções em [`contrib/omarchy/`](contrib/omarchy/README.md).
 
 Pra cancelar sem mirar no X da barra, use `sussurro cancel` (ou `python app.py cancel`). Ele descarta o ditado atual, inclusive enquanto termina de processar. Sem ditado, responde `ok` sem efeito. `toggle` durante a gravação confirma e transcreve, não cancela. Texto já colado no modo simultâneo não é apagado. Bind sugerido no Hyprland: **Super+Shift+Escape** executando `sussurro cancel`, conforme [o exemplo de configuração](contrib/omarchy/README.md#atalho-para-cancelar-o-ditado).
 
@@ -106,7 +106,7 @@ source .venv/bin/activate
 python app.py
 ```
 
-Na primeira execução o modelo local é baixado pelo faster-whisper; as próximas usam o cache local. O botão GRAVAR só é liberado após carregar e aquecer o modelo. O padrão é o Turbo, na GPU NVIDIA se houver e na CPU se não. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
+Na primeira execução o modelo local é baixado pelo faster-whisper; as próximas usam o cache local. O botão Gravar só é liberado após carregar e aquecer o modelo. O padrão é o Turbo, na GPU NVIDIA se houver e na CPU se não. O seletor mostra o nome real da GPU NVIDIA e do processador encontrados na máquina.
 
 Fechar a janela (X ou Super+W) encerra o app de vez, motor e atalhos juntos, como qualquer programa. Uma reunião gravando fica no cache e a próxima abertura oferece salvar. Com o app aberto, `sussurro show` traz a janela e `sussurro quit` encerra pelo terminal.
 
@@ -123,7 +123,7 @@ No card de configuração, escolher em **MODELO** ou **EXECUTAR EM** já troca o
 
 Os modelos locais ficam carregados na VRAM o tempo todo, mesmo parados. Os de nuvem não ocupam a GPU: o áudio do ditado vai por HTTPS e volta como texto. Em 31 termos técnicos ditados em português (nomes de produto, siglas, inglês no meio da frase), o Scribe acertou 29, o Grok 28 e o Large-v3 local 18. Em troca, a nuvem leva de 1,5 a 3 s por trecho, contra ~0,7 s do local numa RTX 4070 Ti Super. Na CPU, sem GPU NVIDIA, os locais ficam lentos e a nuvem é o caminho para ditado fluido.
 
-A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas gravações na aba COMPARAR.
+A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas gravações em **Comparar**.
 
 ### Nuvem: credenciais, fallback e privacidade
 
@@ -131,7 +131,7 @@ A qualidade depende do idioma, ruído, sotaque e vocabulário: compare com suas 
 - **Grok (xAI)** lê `XAI_API_KEY` ou reaproveita o login do Grok CLI (`~/.grok/auth.json`, criado por `grok login`). O token expirado é renovado pelo próprio CLI.
 - Nenhuma chave vai para `settings.json` nem aparece em log ou mensagem de erro. Sem credencial, o seletor recusa a troca e o modelo atual continua.
 - **Fallback:** se a nuvem falhar (rede, cota, timeout), o mesmo trecho é transcrito no Turbo local, que carrega na hora. Por 60 s os trechos seguintes vão direto pro local; depois a nuvem é tentada de novo e a barra avisa quando voltou. O Turbo emprestado sai da VRAM após 2 min sem uso; fica só o contexto CUDA do processo (~200 MB) até reabrir o app.
-- **A reunião tem seu próprio MOTOR**, separado do ditado (veja [Reuniões](#reuniões-linux)). No padrão **Local**, com ditado na nuvem, a aba REUNIÃO usa o Turbo local, carregado só enquanto precisa.
+- **A reunião tem seu próprio MOTOR**, separado do ditado (veja [Reuniões](#reuniões-linux)). No padrão **Local**, com ditado na nuvem, a página **Reunião** usa o Turbo local, carregado só enquanto precisa.
 - Escolher um modelo de nuvem é escolher mandar o áudio do ditado para o provedor, e escolher um MOTOR de nuvem na reunião é mandar o áudio dela. Com modelo e motor locais, nada sai do PC.
 
 Se houver uma GPU AMD junto da NVIDIA, o Sussurro a identifica e explica seu estado abaixo do seletor, mas não oferece um botão AMD que falharia. O pacote Python normal do CTranslate2 usa CUDA; AMD requer uma compilação ROCm/HIP separada. Os dois backends não se somam para acelerar um único ditado, e manter a AMD livre evita disputar memória compartilhada quando ela é integrada ao processador.
@@ -140,7 +140,7 @@ O Turbo reduz o decodificador do large-v3 de 32 para 4 camadas, com uma pequena 
 
 ## Comparar a mesma frase entre modelos
 
-Abra a aba **COMPARAR**, selecione os modelos e clique em **Gravar frase**. Os de nuvem vêm desmarcados: marque só se quiser mandar a frase pro provedor. Fale uma vez e clique em **Parar e comparar**. O áudio do microfone selecionado é limitado a 30 segundos e reutilizado em todos os modelos. Você também pode carregar um WAV PCM de 16 bits, mono ou estéreo, de até 30 segundos.
+Abra **Comparar** na barra lateral, selecione os modelos e clique em **Gravar frase**. Os de nuvem vêm desmarcados: marque só se quiser mandar a frase pro provedor. Fale uma vez e clique em **Parar e comparar**. O áudio do microfone selecionado é limitado a 30 segundos e reutilizado em todos os modelos. Você também pode carregar um WAV PCM de 16 bits, mono ou estéreo, de até 30 segundos.
 
 - **Paralelo (2 por vez):** até dois modelos executam ao mesmo tempo. Eles dividem os recursos; os tempos refletem essa disputa.
 - **Individual (1 por vez):** um modelo termina antes de começar o seguinte, facilitando a comparação de velocidade.
@@ -160,7 +160,9 @@ Quem usava Automático, Tiny, Base, Small, Medium ou Parakeet passa para o **Tur
 
 ## Como usar
 
-- **Atalho global de mouse** — o botão configurado (padrão: lateral 2 / "frente") liga e desliga a gravação em qualquer aplicativo. No Windows o clique é suprimido, então não vira "voltar/avançar" no browser. No Linux o clique também chega ao aplicativo debaixo (pynput não suprime o evento). Em `Setar` você clica o botão desejado (meio, lateral 1 ou lateral 2) para redefinir.
+A janela segue o desenho do Hub do Wispr Flow: tema claro, barra lateral com **Ditado**, **Ao vivo**, **Reunião**, **Estatísticas**, **Dicionário**, **Comparar** e **Omarchy**, e os ajustes abaixo em **Configurações**, uma linha por opção. A página Ditado mostra o histórico agrupado por dia (hora à esquerda, tocar e copiar no hover) e, ao lado, palavras totais, palavras por minuto e dias seguidos. A interface usa Figtree e EB Garamond (SIL OFL 1.1, em `assets/fonts/`), registradas pelo próprio app ao abrir.
+
+- **Atalho global de mouse** — o botão configurado (padrão: lateral 2 / "frente") liga e desliga a gravação em qualquer aplicativo. No Windows o clique é suprimido, então não vira "voltar/avançar" no browser. No Linux o clique também chega ao aplicativo debaixo (pynput não suprime o evento). Em **Alterar** você clica o botão desejado (meio, lateral 1 ou lateral 2) para redefinir.
 - **Ação** — `alternar` (clique liga/desliga) ou `segurar` (push-to-talk).
 - **Microfone** — no Linux com PipeWire, só **Padrão do PC** (segue o microfone padrão do sistema) e os microfones físicos conectados, pelo nome do aparelho (`MCHOSE X9`, `FIFINE Microphone`). Os plugins do ALSA (`lavrate`, `speex`, `upmix`...), monitores e sinks virtuais não aparecem. Um microfone específico grava pela rota `pulse` com `PULSE_SOURCE`, então funciona mesmo com o PipeWire segurando o aparelho. Sem PipeWire (ou no Windows) a lista volta a ser a do PortAudio.
 - **Fonte** — `microfone` (entrada), `audio do PC` (o que está saindo nas caixas/fones: loopback WASAPI no Windows, monitor Pulse/PipeWire no Linux) ou `os dois` (mistura mic + PC antes do VAD/whisper).
@@ -173,11 +175,11 @@ Quem usava Automático, Tiny, Base, Small, Medium ou Parakeet passa para o **Tur
 - **Bolinha** — overlay sempre no topo, sem roubar foco e fora do Alt-Tab; laranja = gravando, invertida = transcrevendo. Arraste para reposicionar (a posição é salva como fração da área útil do monitor).
 - **Histórico / Ao vivo** — aba com as sessões passadas (tocar o WAV ou copiar o texto) e aba com o texto da sessão atual ("Copiar tudo" leva tudo pra área de transferência). Cada ditado tem um botão **Refazer**, inclusive quando a transcrição terminou sem erro. Ele transcreve o mesmo áudio de novo com o modelo e o idioma atuais; pra tentar outro motor, troque no seletor e aplique antes. O texto é atualizado na mesma entrada, sem duplicar o áudio nem colar automaticamente. Se a tentativa falhar, a transcrição anterior continua salva. Áudios cuja transcrição falhou também podem ser recuperados por esse botão.
 - **Biblioteca** — aba onde você cadastra as palavras que o whisper escreve errado. Em "sai assim" liste as variantes separadas por vírgula (`grock, groque, nine houter`), em "deve virar" o termo certo (`Grok`), e clique em Adicionar. A troca é aplicada em toda transcrição antes de ela aparecer na tela, ser colada/digitada e ir para o histórico — sem diferença de maiúscula, tolerando espaçamento diferente em termos de duas palavras, e só em palavra inteira (`grok` não mexe em `grokking`). O ✕ remove a entrada; tudo vale na hora, sem reiniciar.
-- **Estatísticas** — aba com os números do seu ditado, todos derivados do `history/history.jsonl` (não há contador paralelo): total de palavras, palavras por minuto (palavras ÷ tempo de fala, com o melhor ditado à parte), sequência de dias seguidos e recorde, tempo falado e média por ditado, quanto tempo o mesmo texto levaria digitado a 40 ppm, correções aplicadas pela Biblioteca, mapa de atividade das últimas 26 semanas, distribuição por hora do dia e as palavras que você mais fala (boas candidatas à Biblioteca). Ditados antigos entram na conta — a duração é medida pelo tamanho do WAV; só a contagem de correções começa nesta versão. A janela se alarga sozinha ao abrir a aba (limitada à área útil do monitor) e volta ao tamanho anterior ao sair: nada de número escondido atrás de barra de rolagem.
+- **Estatísticas** — página com os números do seu ditado, todos derivados do `history/history.jsonl` (não há contador paralelo): total de palavras, palavras por minuto (palavras ÷ tempo de fala, com o melhor ditado à parte), sequência de dias seguidos e recorde, tempo falado e média por ditado, quanto tempo o mesmo texto levaria digitado a 40 ppm, correções aplicadas pela Biblioteca, mapa de atividade das últimas 26 semanas, distribuição por hora do dia e as palavras que você mais fala (boas candidatas à Biblioteca). Ditados antigos entram na conta — a duração é medida pelo tamanho do WAV; só a contagem de correções começa nesta versão. A janela se alarga sozinha ao abrir a página (limitada à área útil do monitor) e volta ao tamanho anterior ao sair: nada de número escondido atrás de barra de rolagem.
 
 ## Reuniões (Linux)
 
-A aba **REUNIÃO** grava o seu microfone e o que o PC toca em duas trilhas separadas, e ao parar transcreve com quem falou o quê. Funciona com qualquer app de chamada, porque só escuta o áudio do sistema: nenhum bot entra na call. Portado do [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) de Jankees van Woezik (MIT), trocando o whisper.cpp na CPU pelo modelo do ditado na GPU.
+A página **Reunião** grava o seu microfone e o que o PC toca em duas trilhas separadas, e ao parar transcreve com quem falou o quê. Funciona com qualquer app de chamada, porque só escuta o áudio do sistema: nenhum bot entra na call. Portado do [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) de Jankees van Woezik (MIT), trocando o whisper.cpp na CPU pelo modelo do ditado na GPU.
 
 O combo **MOTOR**, ao lado de Importar áudio, escolhe quem transcreve e separa as vozes:
 
@@ -235,7 +237,7 @@ Em Wayland, a injeção usa `wtype`; configure o atalho do compositor para execu
 - `library.json` — sua biblioteca de correções de palavras. Também fica de fora do git.
 - `sussurro.log` — log escrito quando rodando sob `pythonw`.
 
-Todos estão no `.gitignore`. Com modelo local, nada é enviado para serviço externo: captura, VAD, modelo e injeção de texto são 100% locais. Com ElevenLabs Scribe ou Grok, o áudio de cada trecho do ditado vai para o provedor escolhido (ou pro local, se ele falhar), assim como o do **Refazer** e o do `sussurro transcribe`, que usam o modelo atual. O áudio de reunião só sai do PC com um MOTOR de nuvem escolhido na aba REUNIÃO. Pastas de reunião, histórico, biblioteca e configurações nunca saem do PC.
+Todos estão no `.gitignore`. Com modelo local, nada é enviado para serviço externo: captura, VAD, modelo e injeção de texto são 100% locais. Com ElevenLabs Scribe ou Grok, o áudio de cada trecho do ditado vai para o provedor escolhido (ou pro local, se ele falhar), assim como o do **Refazer** e o do `sussurro transcribe`, que usam o modelo atual. O áudio de reunião só sai do PC com um MOTOR de nuvem escolhido na página Reunião. Pastas de reunião, histórico, biblioteca e configurações nunca saem do PC.
 
 ## Linux — o que ainda é limitado
 
@@ -269,7 +271,7 @@ status de erro na interface.
 
 ## Liberar espaço do histórico
 
-Na aba **HISTÓRICO**, **Liberar espaço** pede uma idade em dias (30 por padrão)
+Na página **Ditado**, **Liberar espaço** pede uma idade em dias (30 por padrão)
 e mostra quantos WAVs e MiB serão removidos. A confirmação começa em **Não**.
 Só são removidos áudios mais antigos que essa idade e que já tenham texto salvo.
 Áudios sem texto, recentes e arquivos fora do histórico são preservados.

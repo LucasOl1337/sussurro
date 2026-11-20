@@ -94,7 +94,7 @@ class IpcCancelTests(unittest.TestCase):
                 self.assertEqual(ui.transcriber._session_audio, [])
                 self.assertTrue(ui.transcriber.history_queue.empty())
                 self.assertTrue(ui.text_queue.empty())
-                ui.record_btn.configure.assert_called_once_with(text='GRAVAR')
+                ui.record_btn.configure.assert_called_once_with(text='Gravar')
                 ui.bar.hide.assert_called_once()
                 for stream in streams:
                     stream.stop.assert_called_once()

@@ -19,19 +19,20 @@ import sussurro_meeting_audio as rec
 from sussurro_cloud import is_cloud
 from sussurro_models import LOCAL_DEFAULT, MEETING_ENGINES, normalize_meeting_engine
 
-BG = '#1b1c20'
-FIELD = '#25262b'
-FIELD_HOVER = '#2f3036'
-BORDER = '#454750'
-INK = '#f2f3f3'
-INK_2 = '#c3c6c8'
-MUTED = '#9ba0a4'
-ACCENT = '#f0500a'
-ACCENT_HOVER = '#d64708'
-GRAPHITE = '#16181a'
-WAVE_YOU = '#f07944'
-WAVE_PC = '#7aa2c8'
-SPEAKER_COLORS = ('#f07944', '#7aa2c8', '#9ccf8a', '#d7a6e8', '#e6c86e', '#6fd0c4', '#e88f8f', '#b0b8c0')
+# paleta clara do Hub (mesmos tons do app.py)
+BG = '#fcfcfb'
+FIELD = '#f5f4f0'
+FIELD_HOVER = '#eeebe3'
+BORDER = '#dedad0'
+INK = '#1a1a1a'
+INK_2 = '#3f3f3c'
+MUTED = '#71716e'
+ACCENT = '#1a1a1a'
+ACCENT_HOVER = '#383835'
+GRAPHITE = '#fcfcfb'
+WAVE_YOU = '#c2561f'
+WAVE_PC = '#2f6f9f'
+SPEAKER_COLORS = ('#b4531a', '#2f6f9f', '#3c7d34', '#8a4fa3', '#9a7412', '#1a7a70', '#b23c3c', '#5c6670')
 LANG_CHOICES = ('pt', 'en', 'auto')
 SPEAKER_CHOICES = ('Automático', '1', '2', '3', '4', '5', '6', '7', '8')
 ENGINE_VALUES = {label: key for key, label in MEETING_ENGINES.items()}
@@ -55,7 +56,7 @@ class MeetingPanel(ctk.CTkFrame):
     def __init__(self, parent, host):
         super().__init__(parent, fg_color='transparent')
         self.host = host
-        self.font = (host.FONT_UI, 12)
+        self.font = (host.FONT_UI, 14)
         self.events = queue.Queue()
         self.sources = None          # (mic, pc) enquanto a aba esta aberta ou gravando
         self.recording = False
@@ -90,24 +91,24 @@ class MeetingPanel(ctk.CTkFrame):
             opts.update(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=GRAPHITE,
                         text_color_disabled=GRAPHITE)
         else:
-            opts.update(fg_color=FIELD, hover_color=FIELD_HOVER, text_color=INK_2,
-                        border_width=1, border_color=BORDER)
+            opts.update(fg_color=FIELD_HOVER, hover_color='#e4e0d5', text_color=INK,
+                        border_width=0)
         if width:
             opts['width'] = width
         return ctk.CTkButton(master, **opts)
 
     def _combo(self, master, values, current, width, command=None):
-        box = ctk.CTkComboBox(master, values=list(values), state='readonly', width=width, height=32,
-                              font=self.font, fg_color=FIELD, border_color=FIELD_HOVER,
-                              button_color=FIELD, button_hover_color=FIELD_HOVER,
-                              dropdown_fg_color=FIELD, dropdown_hover_color=FIELD_HOVER,
+        box = ctk.CTkComboBox(master, values=list(values), state='readonly', width=width, height=36,
+                              font=self.font, fg_color='#ffffff', border_color=BORDER, border_width=1,
+                              button_color='#ffffff', button_hover_color=FIELD_HOVER,
+                              dropdown_fg_color='#ffffff', dropdown_hover_color=FIELD_HOVER,
                               dropdown_text_color=INK, text_color=INK, command=command)
         box.set(current)
         return box
 
     def _caption(self, master, text):
         return ctk.CTkLabel(master, text=text, text_color=MUTED, anchor='w',
-                            font=(self.host.FONT_UI, 10, 'bold'))
+                            font=(self.host.FONT_SEMI, 12))
 
     def _build_side(self):
         side = ctk.CTkFrame(self, fg_color=BG, corner_radius=10, width=SIDE_W)
@@ -188,7 +189,7 @@ class MeetingPanel(ctk.CTkFrame):
         self.speakers.pack(side='left')
         engine_row = ctk.CTkFrame(view, fg_color='transparent')
         engine_row.pack(fill='x', padx=16, pady=(10, 0))
-        ctk.CTkLabel(engine_row, text='MOTOR', text_color=MUTED, font=(self.host.FONT_UI, 10, 'bold')).pack(
+        ctk.CTkLabel(engine_row, text='MOTOR', text_color=MUTED, font=(self.host.FONT_SEMI, 12)).pack(
             side='left', padx=(0, 6))
         engine = normalize_meeting_engine(self.host.settings.get('meeting_engine'))
         self.engine = self._combo(engine_row, list(ENGINE_VALUES), MEETING_ENGINES[engine], 230,
@@ -273,7 +274,7 @@ class MeetingPanel(ctk.CTkFrame):
                                   highlightthickness=0, spacing3=8)
         self.transcript.pack(fill='both', expand=True, padx=16, pady=12)
         self.transcript.tag_configure('time', foreground=MUTED, font=(self.host.FONT_MONO, 11))
-        self.transcript.tag_configure('now', background='#30211e')
+        self.transcript.tag_configure('now', background='#f6e7d8')
         for i, color in enumerate(SPEAKER_COLORS):
             self.transcript.tag_configure(f'who{i}', foreground=color, font=(self.host.FONT_UI, 12, 'bold'))
         self.transcript.bind('<Button-1>', self._click_line)
@@ -788,7 +789,7 @@ class MeetingPanel(ctk.CTkFrame):
             canvas.delete('all')
             width, height = max(canvas.winfo_width(), 10), max(canvas.winfo_height(), 10)
             mid = height / 2
-            canvas.create_line(0, mid, width, mid, fill='#3a3b40')
+            canvas.create_line(0, mid, width, mid, fill='#dedad0')
             if source is None:
                 continue
             levels = source.levels()

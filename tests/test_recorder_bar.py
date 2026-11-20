@@ -134,7 +134,7 @@ class RecorderBarCancelTests(unittest.TestCase):
         app.App._cancel(ui)
         ui.transcriber.cancel.assert_called_once_with(from_processing=True)
         self.assertFalse(ui.hotkey.active)
-        ui.record_btn.configure.assert_called_once_with(text='GRAVAR')
+        ui.record_btn.configure.assert_called_once_with(text='Gravar')
         ui.bar.hide.assert_called_once_with()
 
 

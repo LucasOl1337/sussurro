@@ -158,8 +158,13 @@ class HistoryCleanupTests(unittest.TestCase):
             stack.enter_context(patch.object(app, 'detect_hardware', return_value=HardwareInfo()))
             stack.enter_context(patch.object(app.App, '_begin_model_load'))
             stack.enter_context(patch.object(app.App, '_build_devices_tab', side_effect=lambda: app.ctk.CTkFrame(root)))
-            stack.enter_context(patch.object(app, 'MeetingPanel', side_effect=lambda parent, host: app.ctk.CTkFrame(parent)))
+            def meeting_panel(parent, host):
+                frame = app.ctk.CTkFrame(parent)
+                frame.pause = frame.pill_dismissed = frame.shown = frame.hidden = frame.close = Mock()
+                return frame
+            stack.enter_context(patch.object(app, 'MeetingPanel', side_effect=meeting_panel))
             stack.enter_context(patch.object(app, 'RecorderBar'))
+            stack.enter_context(patch.object(app, 'MeetingPill'))
             stack.enter_context(patch.object(threading.Thread, 'start'))
             stack.enter_context(patch.object(app.keyboard, 'Controller'))
             ui = app.App(root)
@@ -201,7 +206,7 @@ class HistoryCleanupTests(unittest.TestCase):
         rendered = [ui.hist_frame.canvas.itemcget(item, 'text') for item in ui.hist_frame.canvas.find_all()
                     if ui.hist_frame.canvas.type(item) == 'text']
         self.assertTrue(any('texto antigo' in text and 'Áudio removido' in text for text in rendered))
-        self.assertTrue(any('Sem áudio' == text for text in rendered))
+        self.assertIn('·', rendered)  # sem audio: o botao de tocar vira um ponto
         self.assertIn('Textos mantidos', ui.status.cget('text'))
         with patch.object(app, 'set_clipboard_text', return_value=True) as write:
             ui._copy_entry('texto antigo')

@@ -15,12 +15,11 @@ from sussurro_models import MODEL_LABELS, fallback_config, is_cloud
 def short_name(model):
     return MODEL_LABELS[model].split(' · ')[0]
 
-BG = '#1b1c20'
-FIELD = '#25262b'
-INK = '#f2f3f3'
-MUTED = '#9ba0a4'
-ACCENT = '#f0500a'
-
+BG = '#fcfcfb'
+FIELD = '#f5f4f0'
+INK = '#1a1a1a'
+MUTED = '#71716e'
+ACCENT = '#1a1a1a'
 
 class ComparisonPanel(ctk.CTkFrame):
     def __init__(self, parent, host, resampler_factory):
@@ -35,7 +34,7 @@ class ComparisonPanel(ctk.CTkFrame):
         self.events = queue.Queue()
         self.rows = {}
         self.model_vars = {}
-        self.font = (host.FONT_UI, 12)
+        self.font = (host.FONT_UI, 14)
         ctk.CTkLabel(self, text='Uma frase. Todos os modelos.', font=(host.FONT_DISPLAY, 23),
                      text_color=INK, anchor='w').pack(fill='x', padx=16, pady=(12, 0))
         ctk.CTkLabel(self, text='Grave ate 30 s no microfone selecionado. Todos recebem exatamente o mesmo audio.',
@@ -47,7 +46,7 @@ class ComparisonPanel(ctk.CTkFrame):
             var = ctk.BooleanVar(value=not is_cloud(model))
             box = ctk.CTkCheckBox(choices, text=short_name(model) + (' (nuvem)' if is_cloud(model) else ''),
                                  variable=var, width=140, font=self.font,
-                                 fg_color=ACCENT, hover_color='#d64708')
+                                 fg_color=ACCENT, hover_color='#383835')
             box.grid(row=i // 2, column=i % 2, sticky='w', pady=4, padx=(0, 14))
             self.model_vars[model] = (var, box)
         options = ctk.CTkFrame(self, fg_color='transparent')
@@ -67,7 +66,7 @@ class ComparisonPanel(ctk.CTkFrame):
         buttons = ctk.CTkFrame(self, fg_color='transparent')
         buttons.pack(fill='x', padx=16, pady=(12, 6))
         self.record = ctk.CTkButton(buttons, text='Gravar frase', command=self.record_toggle,
-                                    fg_color=ACCENT, hover_color='#d64708', text_color='#16181a',
+                                    fg_color=ACCENT, hover_color='#383835', text_color='#fcfcfb',
                                     width=170, height=34, font=self.font)
         self.record.pack(side='left')
         self.again = ctk.CTkButton(buttons, text='Comparar novamente', command=self.compare,
@@ -89,12 +88,12 @@ class ComparisonPanel(ctk.CTkFrame):
         self.results = ctk.CTkScrollableFrame(self, fg_color=BG)
         self.results.pack(fill='both', expand=True, padx=12, pady=(0, 12))
         for button in (self.again, self.open, self.cancel):
-            button.configure(fg_color=FIELD, hover_color='#30211e', text_color=INK,
-                             border_width=1, border_color='#454750')
+            button.configure(fg_color=FIELD, hover_color='#eeebe3', text_color=INK,
+                             border_width=1, border_color='#dedad0')
         for box in (self.device, self.mode, self.language):
-            box.configure(fg_color=FIELD, border_color='#2f3036', button_color=FIELD,
-                          button_hover_color='#30211e', dropdown_fg_color=FIELD,
-                          dropdown_hover_color='#30211e', dropdown_text_color=INK, text_color=INK)
+            box.configure(fg_color='#ffffff', border_color='#dedad0', button_color=FIELD,
+                          button_hover_color='#eeebe3', dropdown_fg_color=FIELD,
+                          dropdown_hover_color='#eeebe3', dropdown_text_color=INK, text_color=INK)
         self.after(80, self.poll)
 
     def acquire(self):
