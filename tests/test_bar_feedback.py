@@ -19,6 +19,9 @@ class BarFeedbackTests(unittest.TestCase):
         bar._follow = Mock()
         bar._ticking = True
         bar._phase = 0.
+        bar._audio = 1.
+        bar._shown_at = 0.
+        bar.get_levels = lambda: []
         bar._follow_n = 0
         return bar
 

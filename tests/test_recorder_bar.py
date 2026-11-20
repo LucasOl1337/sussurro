@@ -22,6 +22,8 @@ class RecorderBarTkTests(unittest.TestCase):
         self.save = Mock()
         self.hypr = SimpleNamespace(available=True, place_bar=Mock(return_value=False),
                                     reset_bar_placement=Mock(),
+                                    native_cursorpos=Mock(return_value=None),
+                                    own_window=Mock(return_value=None),
                                     work_area_at=Mock(return_value=(0, 0, 1600, 1000)))
         patcher = patch.object(app, '_hypr', return_value=self.hypr)
         patcher.start()
@@ -82,7 +84,8 @@ class RecorderBarTkTests(unittest.TestCase):
         self.confirm.assert_not_called()
 
     def test_drag_from_wave_saves_position_without_cancel(self):
-        for event, x in (('<Button-1>', 76), ('<B1-Motion>', 86), ('<ButtonRelease-1>', 86)):
+        for event, x in (('<Button-1>', self.bar.W // 2), ('<B1-Motion>', self.bar.W // 2 + 10),
+                         ('<ButtonRelease-1>', self.bar.W // 2 + 10)):
             self.bar.canvas.event_generate(event, x=x, y=int(self.bar.CY))
             self.root.update()
         self.save.assert_called_once()
@@ -111,30 +114,13 @@ class RecorderBarTkTests(unittest.TestCase):
         self.cancel.assert_not_called()
         self.confirm.assert_not_called()
 
-    def test_meeting_indicator_renders_pause_and_never_calls_dictation_controls(self):
-        self.bar.hide()
-        self.bar.set_meeting(True, False, 65)
-        self.root.update()
-        running = self.bar._render().tobytes()
-        self.click(self.bar.LX, self.bar.CY)
-        self.cancel.assert_not_called()
-        self.confirm.assert_not_called()
-        self.bar.set_meeting(True, True, 65)
-        self.root.update()
-        self.assertEqual(self.bar._state, 'meeting')
-        self.assertNotEqual(self.bar._render().tobytes(), running)
-        self.bar.show('rec')
-        self.bar.set_meeting(True, True, 65)
-        self.assertEqual(self.bar._state, 'rec')
-        self.bar.finish()
-        self.assertEqual(self.bar._state, 'meeting')
-
     def test_scaled_window_fills_capsule_and_maps_clicks(self):
-        # escala 1.5 com force_zero_scaling: a regra de 152x40 logicos chega como 228x60 px
-        self.bar.win.geometry('228x60')
+        # escala 1.5 com force_zero_scaling: a regra de 103x30 logicos chega como 155x45 px
+        w, h = round(self.bar.W * 1.5), round(self.bar.H * 1.5)
+        self.bar.win.geometry(f'{w}x{h}')
         self.root.update()
-        self.assertEqual(self.bar._px, (228, 60))
-        self.assertEqual(self.bar._render().size, (228, 60))
+        self.assertEqual(self.bar._render().size, self.bar._px)
+        self.assertAlmostEqual(self.bar._px[0] / self.bar.W, 1.5, delta=0.02)
         self.click(self.bar.RX * 1.5, self.bar.CY * 1.5)
         self.confirm.assert_called_once_with()
         self.cancel.assert_not_called()

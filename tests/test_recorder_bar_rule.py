@@ -64,8 +64,8 @@ handlers['window.open']({class = 'SussurroBar'})
     def test_placement_and_rendering_policy_are_preserved(self):
         for key in ('float', 'pin', 'render_unfocused'):
             self.assertEqual(self.rule[key], 'true')
-        self.assertEqual(self.rule['size'], '152,40')
-        self.assertEqual(self.rule['rounding'], '20')
+        self.assertEqual(self.rule['size'], f'{app.RecorderBar.W},{app.RecorderBar.H}')
+        self.assertEqual(self.rule['rounding'], str(app.RecorderBar.H // 2))
 
     def test_titlebars_of_floating_workspaces_skip_bar_and_meeting(self):
         # Sem o plugin o arquivo carrega inteiro; com ele, a regra entra uma vez so.

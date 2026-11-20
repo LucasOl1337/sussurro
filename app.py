@@ -2209,15 +2209,17 @@ def _native_drag_end(drag):
 
 
 class RecorderBar:
-    """Barra flutuante de gravacao: cancelar (X), onda ao vivo do audio e confirmar (V).
+    """Barra flutuante de gravacao no desenho da pilula do Wispr Flow: cancelar (X),
+    dez barras que pulsam com o nivel do audio e confirmar (V); transcrevendo, as
+    barras apagam e um spinner toma o lugar do confirmar (o X volta com o mouse em cima).
 
     Sempre no topo, fora do Alt-Tab, sem roubar foco. Aparece no monitor onde o cursor
     esta (e segue se o cursor trocar de monitor) na posicao relativa salva; arrastavel
     pela area da onda pra reposicionar — a posicao e salva como fracao da area util,
     entao se adapta a qualquer resolucao.
 
-    A onda desenha o RMS recente do audio JA MISTURADO (Transcriber.levels), entao ela
-    reflete exatamente a fonte escolhida: microfone, audio do PC ou os dois somados.
+    As barras seguem o RMS recente do audio JA MISTURADO (Transcriber.levels), entao
+    refletem exatamente a fonte escolhida: microfone, audio do PC ou os dois somados.
 
     Desenho via PIL com supersampling — o canvas do Tk nao tem antialias e a capsula
     ficaria serrilhada.
@@ -2228,21 +2230,35 @@ class RecorderBar:
     """
 
     CLS = "SussurroBar"
-    W, H = 152, 40
+    # Medidas da pilula de ditado do Wispr Flow (medidas no app rodando, 20/11/2026):
+    # capsula 103x30 preta, botoes redondos de 18 px a 6 px da borda, 10 barras de 2 px
+    # com passo de 4 px que pulsam juntas pelo nivel do audio, spinner de 8 tracos.
+    W, H = 103, 30
     PAD = 6
-    BTN = 28                       # diametro dos botoes redondos
-    BARS = 15
-    BAR_W = 2.8
-    BAR_MIN, BAR_MAX = 1.6, 11.0   # meia-altura da barra (silencio -> pico)
+    BTN = 18                       # diametro dos botoes redondos
+    BARS = 10
+    BAR_W = 2.0
+    BAR_PITCH = 4.0
+    BAR_BASE = 2.0                 # altura da barra com escala 1 (silencio)
+    AUDIO_MAX = 5.5                # escala maxima pelo audio: 2 px * 5.5 * 1.5 cabe em 18 px
+    # pulso de cada barra: (fracao do ciclo de 1 s, multiplicador), ease-in-out entre pontos
+    PULSE = ((0.0, 1.0), (0.2, 1.2), (0.4, 1.5), (0.8, 1.1), (0.9, 1.3), (1.0, 1.0))
+    PULSE_DELAYS = (0.0, 0.1, 0.2, 0.3, 0.4, -0.5, -0.4, -0.3, -0.2, -0.1)
+    SPIN_S = 1.1                   # volta do spinner
+    FADE_S = 0.28                  # entrada da capsula
     SS = 4                         # fator de supersampling do desenho
-    FPS_MS = 45
+    FPS_MS = 33
     TRANSPARENT = "#010203"
 
-    PILL_BG = "#17181b"
-    PILL_BORDER = "#3a3c43"
-    BTN_BG = "#3a3c43"
-    BTN_BG_HOVER = "#4a4d55"
-    WAVE_IDLE = "#5c6065"
+    PILL_BG = "#000000"
+    PILL_BORDER = "#30302f"
+    BTN_BG = "#4d4a42"             # cancelar
+    BTN_INK = "#fcfcfb"
+    OK_BG = "#fcfcfb"              # confirmar
+    OK_INK = "#1a1a1a"
+    WAVE_ON = "#ffffff"
+    WAVE_DIM = "#666666"           # branco a 40% sobre o preto
+    SPIN_RGB = (163, 148, 199)
 
     def __init__(self, root: tk.Tk, get_rel_pos, save_rel_pos,
                  get_levels, on_cancel, on_confirm):
@@ -2256,8 +2272,12 @@ class RecorderBar:
         self.CY = self.H / 2
         self.LX = self.PAD + self.BTN / 2            # centro do botao cancelar
         self.RX = self.W - self.PAD - self.BTN / 2   # centro do botao confirmar
-        self.WX0 = self.LX + self.BTN / 2 + 7        # area da onda
-        self.WX1 = self.RX - self.BTN / 2 - 7
+        span = (self.BARS - 1) * self.BAR_PITCH + self.BAR_W
+        self.WX0 = (self.W - span) / 2               # borda esquerda da primeira barra
+        self.WX1 = self.WX0 + span
+        # transcrevendo, os botoes somem: barras puxam pra esquerda, spinner a direita
+        self.PX0 = 21.0
+        self.SX = self.W - 21.0
 
         # No Hyprland a barra e uma janela gerenciada (classe SussurroBar): a regra em
         # contrib/omarchy/sussurro.lua a deixa flutuante, fixa, sem foco e com rounding,
@@ -2279,8 +2299,8 @@ class RecorderBar:
                     pass
             self.TRANSPARENT = self.PILL_BG  # fora da capsula fica a cor dela; o rounding corta
             canvas_bg = self.PILL_BG
-        # Com escala fracionaria (xwayland:force_zero_scaling) a regra de 152x40 logicos
-        # vira 228x60 px no X11: a capsula acompanha o tamanho real da janela, senao a
+        # Com escala fracionaria (xwayland:force_zero_scaling) a regra de 103x30 logicos
+        # vira 155x45 px no X11: a capsula acompanha o tamanho real da janela, senao a
         # sobra aparece no cinza padrao do Tk.
         self._k = 1.0
         self._px = (self.W, self.H)
@@ -2303,7 +2323,6 @@ class RecorderBar:
 
         self._state = None
         self._feedback = None  # tipo, motivo, prazo monotonic
-        self._notice_font = _pil_font(10 * self.SS)
         self._reason_font = _pil_font(8 * self.SS)
         self._hovered = None    # "cancel" | "ok" | None
         self._pressed = None
@@ -2313,6 +2332,8 @@ class RecorderBar:
         self._drag_off = (0, 0)
         self._native_drag = None  # (address, cursor0, at0, size) no Hyprland
         self._phase = 0.0
+        self._audio = 1.0       # escala das barras pelo audio, suavizada
+        self._shown_at = 0.0
         self._photo = None
         self._ticking = False
         self._follow_n = 0
@@ -2385,6 +2406,9 @@ class RecorderBar:
         self._feedback = None
         if self.hypr:
             _hypr().reset_bar_placement(self.CLS)
+        if self._state not in ("rec", "proc"):
+            self._shown_at = time.monotonic()
+            self._audio = 1.0
         self._state = state
         self._follow()
         self.win.deiconify()
@@ -2431,6 +2455,7 @@ class RecorderBar:
             self._ticking = False
             return
         self._phase += self.FPS_MS / 1000.0
+        self._audio = self._next_audio(self._audio)
         self._draw()
         self._follow_n += 1
         if self._follow_n % 4 == 0:  # ~180 ms: segue o cursor de monitor sem martelar o socket
@@ -2452,7 +2477,7 @@ class RecorderBar:
             return "dismiss" if 0 <= x < self.W and 0 <= y < self.H else None
         r2 = (self.BTN / 2) ** 2
         if (x - self.LX) ** 2 + (y - self.CY) ** 2 <= r2:
-            return "cancel"
+            return "cancel"  # transcrevendo, o X so aparece com o mouse em cima
         if self._state == "rec" and (x - self.RX) ** 2 + (y - self.CY) ** 2 <= r2:
             return "ok"
         return None
@@ -2532,91 +2557,130 @@ class RecorderBar:
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
 
+    def _next_audio(self, cur: float) -> float:
+        """Nivel do audio -> escala das barras, com subida e descida suaves."""
+        if self._state != "rec":
+            return 1.0
+        recent = list(self.get_levels())[-4:]  # ~100 ms
+        level = sum(recent) / len(recent) if recent else 0.0
+        target = 1.0 + (self.AUDIO_MAX - 1.0) * min(1.0, level * 9.0) ** 0.55
+        keep = 0.85 ** (self.FPS_MS / (1000 / 60))
+        return cur * keep + target * (1 - keep)
+
+    @classmethod
+    def _pulse(cls, t: float) -> float:
+        t %= 1.0
+        for (t0, v0), (t1, v1) in zip(cls.PULSE, cls.PULSE[1:]):
+            if t <= t1:
+                u = (t - t0) / (t1 - t0)
+                return v0 + (v1 - v0) * u * u * (3 - 2 * u)
+        return cls.PULSE[-1][1]
+
     def _render(self) -> Image.Image:
         s = self.SS
         img = Image.new("RGB", (self.W * s, self.H * s), self.TRANSPARENT)
         d = ImageDraw.Draw(img)
-        notice_color = "#f08080" if self._feedback and self._feedback[0] == "error" else INK_3
-        d.rounded_rectangle([0.7 * s, 0.7 * s, (self.W - 0.7) * s, (self.H - 0.7) * s],
-                            radius=(self.H / 2 - 0.7) * s,
-                            fill=self.PILL_BG, outline=notice_color if self._feedback else self.PILL_BORDER,
-                            width=max(1, round(1.1 * s)))
+        error = bool(self._feedback and self._feedback[0] == "error")
+        d.rounded_rectangle([0.5 * s, 0.5 * s, (self.W - 0.5) * s, (self.H - 0.5) * s],
+                            radius=(self.H / 2 - 0.5) * s, fill=self.PILL_BG,
+                            outline="#f08080" if error else self.PILL_BORDER,
+                            width=max(1, round(1.0 * s)))
+        active = self._state in ("rec", "proc")
         if self._feedback:
-            kind, reason, _ = self._feedback
-            active = self._state in ("rec", "proc")
-            x0, x1 = (self.WX0, self.WX1) if active else (12, self.W - 12)
-            w = round((x1 - x0) * s)
-            strip = Image.new("RGB", (w, 30 * s), self.PILL_BG)
-            text = ImageDraw.Draw(strip)
-            text.text((w / 2, 0), "ERRO" if kind == "error" else "OCUPADO",
-                      font=self._notice_font, fill=notice_color, anchor="mt")
-            width = text.textlength(reason, font=self._reason_font)
-            offset = int(self._phase * 45 * s) % max(1, int(width + w / 2)) if width > w else 0
-            text.text((-offset if width > w else w / 2, 15 * s), reason,
-                      font=self._reason_font, fill=INK_2, anchor="lt" if width > w else "mt")
-            img.paste(strip, (round(x0 * s), 5 * s))
+            x0, x1 = (self.LX + self.BTN / 2 + 4, self.RX - self.BTN / 2 - 4) if active \
+                else (12, self.W - 12)
+            self._draw_notice(img, x0, x1, "#f08080" if error else INK_2)
             if not active:
-                return img.resize(self._px, Image.BOX)
+                return self._finish(img)
         else:
             self._draw_wave(d)
-        self._draw_cancel(d)
         if self._state == "rec":
+            self._draw_cancel(d)
             self._draw_confirm(d)
         else:
             self._draw_spinner(d)
-        return img.resize(self._px, Image.BOX)
+            if self._hovered == "cancel":
+                self._draw_cancel(d)
+        return self._finish(img)
+
+    def _finish(self, img):
+        img = img.resize(self._px, Image.BOX)
+        k = (time.monotonic() - self._shown_at) / self.FADE_S
+        if 0 <= k < 1:  # entrada: o fundo e preto, entao clarear do preto e o fade
+            k = 1 - (1 - k) ** 3
+            img = Image.blend(Image.new("RGB", img.size, self.PILL_BG), img, k)
+        return img
+
+    def _draw_notice(self, img, x0, x1, color):
+        s = self.SS
+        reason = self._feedback[1] if self._feedback else ""
+        w = max(1, round((x1 - x0) * s))
+        strip = Image.new("RGB", (w, (self.H - 8) * s), self.PILL_BG)
+        text = ImageDraw.Draw(strip)
+        width = text.textlength(reason, font=self._reason_font)
+        mid = (self.H - 8) * s / 2
+        if width > w:  # nao cabe: mostra o comeco, espera um pouco e rola
+            offset = int(max(0.0, self._phase - 0.8) * 30 * s) % max(1, int(width + w / 2))
+            text.text((-offset, mid), reason, font=self._reason_font, fill=color, anchor="lm")
+        else:
+            text.text((w / 2, mid), reason, font=self._reason_font, fill=color, anchor="mm")
+        img.paste(strip, (round(x0 * s), 4 * s))
 
     def _draw_wave(self, d):
         s = self.SS
-        slot = (self.WX1 - self.WX0) / self.BARS
-        if self._state == "rec":
-            levels = list(self.get_levels())[-self.BARS:]
-            levels = [0.0] * (self.BARS - len(levels)) + levels
-            amps = [min(1.0, lv * 9.0) ** 0.55 for lv in levels]
-            colors = [ACCENT] * self.BARS
-        else:  # transcrevendo: nao ha entrada pra mostrar, entao onda viajando
-            amps, colors = [], []
-            head = (self._phase * 9.0) % (self.BARS + 6) - 3
-            for i in range(self.BARS):
-                bump = math.exp(-((i - head) ** 2) / 4.0)
-                amps.append(0.12 + 0.75 * bump)
-                colors.append(ACCENT if bump > 0.25 else self.WAVE_IDLE)
-        for i, (a, color) in enumerate(zip(amps, colors)):
-            x = self.WX0 + slot * (i + 0.5)
-            half = self.BAR_MIN + (self.BAR_MAX - self.BAR_MIN) * a
-            d.rounded_rectangle([(x - self.BAR_W / 2) * s, (self.CY - half) * s,
-                                 (x + self.BAR_W / 2) * s, (self.CY + half) * s],
-                                radius=self.BAR_W / 2 * s, fill=color)
+        rec = self._state == "rec"
+        x0 = self.WX0 if rec else self.PX0
+        mid = (self.BARS - 1) / 2
+        for i in range(self.BARS):
+            if rec:
+                shape = max(0.0, 1 - (mid - i) ** 2 / 48)
+                pulse = self._pulse(self._phase + self.PULSE_DELAYS[i])
+                h = max(1.0, self.BAR_BASE * self._audio * shape * pulse)
+            else:
+                h = self.BAR_BASE
+            x = x0 + i * self.BAR_PITCH
+            d.rounded_rectangle([x * s, (self.CY - h / 2) * s,
+                                 (x + self.BAR_W) * s, (self.CY + h / 2) * s],
+                                radius=0.5 * s, fill=self.WAVE_ON if rec else self.WAVE_DIM)
 
     def _circle(self, d, cx, r, fill):
         s = self.SS
         d.ellipse([(cx - r) * s, (self.CY - r) * s, (cx + r) * s, (self.CY + r) * s], fill=fill)
 
-    def _draw_cancel(self, d):
+    def _stroke(self, d, pts, cx, color, w):
         s = self.SS
-        self._circle(d, self.LX, self.BTN / 2,
-                     self.BTN_BG_HOVER if self._hovered == "cancel" else self.BTN_BG)
-        a = 4.4
-        for dx in (a, -a):
-            d.line([(self.LX - dx) * s, (self.CY - a) * s,
-                    (self.LX + dx) * s, (self.CY + a) * s],
-                   fill=INK, width=max(1, round(1.9 * s)))
+        xy = [((cx + px) * s, (self.CY + py) * s) for px, py in pts]
+        d.line(xy, fill=color, width=max(1, round(w * s)), joint="curve")
+        r = w / 2 * s
+        for x, y in (xy[0], xy[-1]):  # pontas redondas
+            d.ellipse([x - r, y - r, x + r, y + r], fill=color)
+
+    def _draw_cancel(self, d):
+        self._circle(d, self.LX, self.BTN / 2, self.BTN_BG)
+        a = 3.0
+        self._stroke(d, [(-a, -a), (a, a)], self.LX, self.BTN_INK, 1.6)
+        self._stroke(d, [(-a, a), (a, -a)], self.LX, self.BTN_INK, 1.6)
 
     def _draw_confirm(self, d):
-        s = self.SS
-        self._circle(d, self.RX, self.BTN / 2, ACCENT if self._hovered == "ok" else INK)
-        pts = [(-4.6, 0.3), (-1.5, 3.4), (4.8, -3.6)]
-        d.line([((self.RX + px) * s, (self.CY + py) * s) for px, py in pts],
-               fill=GRAPHITE, width=max(1, round(2.3 * s)), joint="curve")
+        self._circle(d, self.RX, self.BTN / 2, self.OK_BG)
+        self._stroke(d, [(-4.0, 0.0), (-1.5, 2.5), (4.0, -3.0)], self.RX, self.OK_INK, 1.6)
 
     def _draw_spinner(self, d):
         s = self.SS
-        r = self.BTN / 2 - 3
-        box = [(self.RX - r) * s, (self.CY - r) * s, (self.RX + r) * s, (self.CY + r) * s]
-        w = max(1, round(2.2 * s))
-        d.ellipse(box, outline=self.BTN_BG, width=w)
-        start = (self._phase * 300.0) % 360.0
-        d.arc(box, start, start + 100, fill=ACCENT, width=w)
+        r_, g_, b_ = self.SPIN_RGB
+        for i in range(8):
+            delay = -0.1375 * (7 - i)
+            k = ((self._phase - delay) / self.SPIN_S) % 1.0
+            alpha = 0.88 - (0.88 - 0.15) * k
+            color = (round(r_ * alpha), round(g_ * alpha), round(b_ * alpha))
+            ang = math.radians(45 * i)
+            ux, uy = math.sin(ang), -math.cos(ang)
+            # traco de 2x5 px com centro a 6 px do meio
+            p0 = (self.SX + ux * 4.5, self.CY + uy * 4.5)
+            p1 = (self.SX + ux * 7.5, self.CY + uy * 7.5)
+            d.line([(p0[0] * s, p0[1] * s), (p1[0] * s, p1[1] * s)], fill=color, width=2 * s)
+            for x, y in (p0, p1):
+                d.ellipse([(x - 1) * s, (y - 1) * s, (x + 1) * s, (y + 1) * s], fill=color)
 
 
 class MeetingPill:

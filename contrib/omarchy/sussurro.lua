@@ -11,7 +11,7 @@ o.window({ class = "^Sussurro$" }, {
   opacity = "1 1",
 })
 
--- Barra de gravacao do Sussurro (janela Tk/XWayland de 152x40, classe SussurroBar).
+-- Barra de gravacao do Sussurro (janela Tk/XWayland de 103x30, classe SussurroBar).
 -- Gerenciada como flutuante fixa: o Hyprland recorta os cantos (rounding), nao anima,
 -- nao sombreia e nao toma foco ao abrir ou passar o mouse. no_focus impediria os cliques.
 o.window({ class = "^SussurroBar$" }, {
@@ -24,8 +24,8 @@ o.window({ class = "^SussurroBar$" }, {
   no_blur = true,
   no_dim = true,
   border_size = 0,
-  rounding = 20,
-  size = { 152, 40 },
+  rounding = 15,
+  size = { 103, 30 },
   tag = "-default-opacity",
   opacity = "1 1",
   render_unfocused = true,
